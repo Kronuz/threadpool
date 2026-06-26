@@ -18,6 +18,8 @@
 
 #include "threadpool.hh"
 
+#include "concurrent_queue.h"
+
 int main() {
 	// ---- 1. Run N tasks on a pool and verify all of them executed. ----
 	constexpr int N = 1000;
@@ -89,6 +91,33 @@ int main() {
 
 		std::printf("threadpool OK: TaskQueue call() ran a task (49), clear() dropped %zu tasks\n",
 		            cleared);
+	}
+
+	// ---- 4. ConcurrentQueue::try_dequeue_bulk writes every slot. ----
+	// Regression test: before the fix, try_dequeue_bulk wrote *itemFirst (the
+	// same destination) every iteration instead of *itemFirst++, so only the
+	// last output slot received a value and the rest stayed default/garbage.
+	// Enqueue Q distinct values, bulk-dequeue them into a vector of size Q, and
+	// assert every distinct value lands in its own consecutive slot.
+	{
+		constexpr int Q = 32;
+		ConcurrentQueue<int> cq;
+		for (int i = 0; i < Q; ++i) {
+			bool ok = cq.enqueue(1000 + i);   // distinct, non-default values
+			assert(ok);
+		}
+
+		std::vector<int> out(Q, -1);          // sentinel so unwritten slots show
+		std::size_t got = cq.try_dequeue_bulk(out.begin(), out.size());
+		assert(got == static_cast<std::size_t>(Q));
+
+		// Every dequeued item must land in its own slot, in FIFO order.
+		for (int i = 0; i < Q; ++i) {
+			assert(out[i] == 1000 + i);       // fails pre-fix: only out[Q-1] set
+		}
+		assert(cq.empty());
+
+		std::printf("threadpool OK: try_dequeue_bulk wrote all %d distinct slots\n", Q);
 	}
 
 	std::printf("all threadpool tests passed\n");

@@ -78,9 +78,10 @@ public:
 
 	template<typename It>
 	size_t try_dequeue_bulk(It itemFirst, size_t count) {
+		std::lock_guard<std::mutex> lk(*mtx);
 		size_t dequeued = 0;
 		while (!queue.empty() && count--) {
-			*itemFirst = std::move(queue.front());
+			*itemFirst++ = std::move(queue.front());
 			queue.pop_front();
 			++dequeued;
 		}
