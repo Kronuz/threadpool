@@ -225,6 +225,25 @@ The test submits 1000 tasks to a pool and checks all ran and summed correctly,
 resolves 50 `async` futures, and exercises `TaskQueue`'s enqueue/call/clear. It
 prints `all threadpool tests passed` and exits 0.
 
+## Examples
+
+[`examples/demo.cc`](examples/demo.cc) is a runnable tour. A top-level CMake build
+produces it next to the test:
+
+```sh
+cmake -B build && cmake --build build && ./build/threadpool_demo
+```
+
+It submits a batch of jobs with `async()` and collects the results from their
+futures; fans a few hundred tasks across four named workers and tallies how many
+each one ran, so you can watch the load spread across real threads (each task
+asks `get_thread_name()` who it is running as); fires a batch with `enqueue()`
+and peeks at the lock-free `threadpool_workers()` / `running_size()` / `size()`
+counters while the work is still in flight; runs the same batch under both
+shutdowns (`end()` drains the queue, `finish()` stops as soon as possible) so you
+see drain-vs-asap side by side; and ends with `TaskQueue`, the one-shot queue of
+callbacks you `enqueue` now and `call`/`clear` yourself later.
+
 ## Provenance
 
 Extracted from [Xapiand](https://github.com/Kronuz/Xapiand), where this pool runs
