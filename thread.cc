@@ -117,12 +117,13 @@ set_thread_name(const std::string& name)
 	pthread_set_name_np(pthread, (std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str());
 #endif
 	std::lock_guard<std::mutex> lk(thread_names_mutex);
-	[[maybe_unused]] auto emplaced = thread_names.emplace(std::piecewise_construct,
-		std::forward_as_tuple(std::this_thread::get_id()),
-		std::forward_as_tuple(name));
+	// insert_or_assign, not emplace: the OS reuses std::thread::id values once a
+	// (detached) thread ends, so a new thread can land on a retired id. emplace
+	// would keep the dead thread's name; assign overwrites it with the current one.
+	[[maybe_unused]] auto result = thread_names.insert_or_assign(std::this_thread::get_id(), name);
 	// Register the named thread so an external crash handler can dump per-thread
 	// callstacks. No-op by default; Xapiand maps this to init_thread_info.
-	THREADPOOL_THREAD_REGISTER(pthread, emplaced.first->second.c_str());
+	THREADPOOL_THREAD_REGISTER(pthread, result.first->second.c_str());
 }
 
 
