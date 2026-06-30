@@ -13,6 +13,12 @@
  *                                           `n`) so an external crash handler can
  *                                           print per-thread callstacks. No-op by
  *                                           default.
+ *   - THREADPOOL_THREAD_UNREGISTER()      — releases the *calling* thread's
+ *                                           registration as it is about to exit,
+ *                                           the symmetric teardown for REGISTER.
+ *                                           Lets a fixed-size registry reclaim the
+ *                                           slot instead of leaking it on thread
+ *                                           churn. No-op by default.
  *
  * To restore real tracing and thread registration (the way Xapiand uses them),
  * provide your own versions. Two ways:
@@ -32,6 +38,7 @@
  *     #include "log.h"
  *     #include "traceback.h"
  *     #define THREADPOOL_THREAD_REGISTER(pthread, name) init_thread_info(pthread, name)
+ *     #define THREADPOOL_THREAD_UNREGISTER() traceback::deregister_thread()
  */
 
 #pragma once
@@ -48,4 +55,12 @@
 // from traceback.h). No-op by default.
 #ifndef THREADPOOL_THREAD_REGISTER
 #define THREADPOOL_THREAD_REGISTER(pthread, name) ((void)0)
+#endif
+
+// Thread-deregistration hook. Called as the calling thread is about to exit, the
+// symmetric teardown for THREADPOOL_THREAD_REGISTER. A consumer maps this to its
+// crash-callstack registry's per-thread release (Xapiand: deregister_thread from
+// traceback.h) so a fixed-size registry reclaims the slot. No-op by default.
+#ifndef THREADPOOL_THREAD_UNREGISTER
+#define THREADPOOL_THREAD_UNREGISTER() ((void)0)
 #endif

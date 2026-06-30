@@ -101,6 +101,19 @@ setup_thread(const std::string& name, ThreadPolicyType)
 }
 
 
+void
+teardown_thread(ThreadPolicyType)
+{
+	// Symmetric counterpart to setup_thread: release the calling thread's crash
+	// registration as the thread is about to exit, so a fixed-size registry can
+	// reclaim the slot instead of leaking it on thread churn. No-op by default;
+	// Xapiand maps this to traceback::deregister_thread. We intentionally leave
+	// the name in thread_names: get_thread_name may still be queried after the
+	// thread ends, and insert_or_assign self-heals on std::thread::id reuse.
+	THREADPOOL_THREAD_UNREGISTER();
+}
+
+
 ////////////////////////////////////////////////////////////////////////////////
 
 

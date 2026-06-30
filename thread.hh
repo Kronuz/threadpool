@@ -55,6 +55,7 @@ int sched_getcpu();
 
 void run_thread(void *(*thread_routine)(void *), void *arg, ThreadPolicyType thread_policy);
 void setup_thread(const std::string& name, ThreadPolicyType thread_policy);
+void teardown_thread(ThreadPolicyType thread_policy);
 
 void set_thread_name(const std::string& name);
 
@@ -92,6 +93,10 @@ class Thread {
 				thread->_promise.set_exception(std::current_exception());
 			} catch(...) {} // set_exception() may throw too
 		}
+		// The thread is about to exit: release its crash registration (symmetric
+		// to setup_thread's THREADPOOL_THREAD_REGISTER). Both the normal and the
+		// exception path converge here, so a single call covers both.
+		teardown_thread(thread_policy);
 		return nullptr;
 	}
 
