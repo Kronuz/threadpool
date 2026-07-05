@@ -28,7 +28,7 @@
 #include <mutex>
 
 struct ConcurrentQueueDefaultTraits {
-	static const size_t BLOCK_SIZE = 32;
+	static const size_t block_size = 32;
 };
 
 

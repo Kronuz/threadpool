@@ -390,7 +390,7 @@ public:
 	}
 
 	std::size_t clear() {
-		std::array<std::packaged_task<R(Args...)>, ConcurrentQueueDefaultTraits::BLOCK_SIZE> tasks;
+		std::array<std::packaged_task<R(Args...)>, ConcurrentQueueDefaultTraits::block_size> tasks;
 		std::size_t cleared = 0;
 		while (auto dequeued = _queue.try_dequeue_bulk(tasks.begin(), tasks.size())) {
 			cleared += dequeued;
