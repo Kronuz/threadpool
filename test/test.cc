@@ -20,6 +20,16 @@
 
 #include "concurrent_queue.h"
 
+// A free function and a small type with a method, used to exercise async() with
+// every callable shape (ported from Xapiand's oldtests threadpool test_pool_func,
+// which the smoke test's single-lambda async case did not cover).
+static int square_free(int i) { return i * i; }
+
+struct Multiplier {
+	int factor;
+	int scale(int i) const { return factor * i; }
+};
+
 int main() {
 	// ---- 1. Run N tasks on a pool and verify all of them executed. ----
 	constexpr int N = 1000;
@@ -118,6 +128,32 @@ int main() {
 		assert(cq.empty());
 
 		std::printf("threadpool OK: try_dequeue_bulk wrote all %d distinct slots\n", Q);
+	}
+
+	// ---- 5. async() accepts every callable shape, not just a plain lambda. ----
+	// Ported from Xapiand's oldtests test_pool_func: a no-arg lambda, a lambda
+	// with arguments, a free function, a member function (object + pointer), and
+	// a lambda capturing an object all package correctly and resolve their future.
+	{
+		ThreadPool<std::function<void()>> pool("C{:02}", 3);
+		Multiplier mul{10};
+		int captured = 3;
+
+		auto f_nullary = pool.async([] { return 42; });
+		auto f_lambda  = pool.async([](int a, int b) { return a * b; }, 6, 7);
+		auto f_free    = pool.async(&square_free, 9);
+		auto f_member  = pool.async(&Multiplier::scale, &mul, 5);
+		auto f_capture = pool.async([&captured](int i) { return captured + i; }, 4);
+
+		assert(f_nullary.get() == 42);
+		assert(f_lambda.get()  == 42);
+		assert(f_free.get()    == 81);
+		assert(f_member.get()  == 50);
+		assert(f_capture.get() == 7);
+
+		pool.finish();
+		pool.join();
+		std::printf("threadpool OK: async() dispatched nullary/lambda/free/member/captured callables\n");
 	}
 
 	std::printf("all threadpool tests passed\n");
