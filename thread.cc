@@ -121,12 +121,15 @@ void
 set_thread_name(const std::string& name)
 {
 	[[maybe_unused]] auto pthread = pthread_self();
-#if defined(HAVE_PTHREAD_SETNAME_NP) && defined(__linux__)
-	pthread_setname_np(pthread, (std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str());
-	// pthread_setname_np(pthread, (std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str(), nullptr);
-#elif defined(HAVE_PTHREAD_SETNAME_NP)
+#if defined(HAVE_PTHREAD_SETNAME_NP) && defined(__APPLE__)
+	// Darwin's pthread_setname_np takes a single argument and names the calling
+	// thread only (there is no thread handle parameter).
 	pthread_setname_np((std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str());
+#elif defined(HAVE_PTHREAD_SETNAME_NP)
+	// Linux and FreeBSD (>= 12.2) expose the two-argument, Linux-compatible form.
+	pthread_setname_np(pthread, (std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str());
 #elif defined(HAVE_PTHREAD_SET_NAME_NP)
+	// Historic BSD spelling: void pthread_set_name_np(thread, name).
 	pthread_set_name_np(pthread, (std::string(THREADPOOL_THREAD_NAME_PREFIX) + name).c_str());
 #endif
 	std::lock_guard<std::mutex> lk(thread_names_mutex);
