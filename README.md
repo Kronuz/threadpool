@@ -1,5 +1,7 @@
 # threadpool
 
+[![CI](https://github.com/Kronuz/threadpool/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/threadpool/actions/workflows/ci.yml)
+
 A small, dependency-free C++20 **thread pool** and the thread primitives it is
 built on, extracted from [Xapiand](https://github.com/Kronuz/Xapiand).
 
