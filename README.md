@@ -144,6 +144,48 @@ while (callbacks.call()) { }  // runs each queued callback once
 - `size()`, `running_size()`, `threadpool_size()`, `threadpool_capacity()`,
   `threadpool_workers()`, `finished()` — lock-free state queries.
 
+### `TaskGroup<Pool = ThreadPool<>>` (`task_group.hh`)
+
+An owner-scoped set of tasks on a shared `ThreadPool<std::function<void()>>`.
+The pool's own behavior is unchanged; the group layers on top of `enqueue`.
+
+```cpp
+#include "task_group.hh"
+
+ThreadPool<> pool("W{:02}", 4);
+{
+	TaskGroup group(pool);
+	group.enqueue([] { step(); });
+	group.enqueue([](const TaskGroupStopToken& stop) {
+		while (!stop.stop_requested() && more()) { chunk(); }
+	});
+	group.wait();
+}  // the destructor closes, cancels, and waits
+```
+
+- `TaskGroup(Pool& pool, size_t max_concurrency = 0)` — `max_concurrency` caps
+  how many of the group's tasks run at once (`0` means the pool's thread count).
+- `enqueue(Func&&) -> bool` — queue `func()` or `func(const TaskGroupStopToken&)`;
+  `false` (and the callable is destroyed) once the group is closed. A task may
+  enqueue to its own group.
+- `cancel() -> size_t` — drop the queued tasks that have not started (they never
+  run; their destructors run on the calling thread), request stop for the running
+  ones, and return how many were dropped. Tasks enqueued afterwards run normally.
+- `wait()` — block until the group has no queued and no running tasks.
+- `cancel_and_wait() -> size_t` — both.
+- `close()` / `closed()` — reject further enqueues; queued tasks still run.
+- `~TaskGroup()` — `close()`, then `cancel_and_wait()`.
+- `TaskGroupStopToken::stop_requested()` — a relaxed atomic load; turns true once
+  the group cancels after the task started. Valid only during the task's call.
+
+Groups are served round-robin and each group is FIFO: one group with a thousand
+queued tasks delays another group's task by at most `max_concurrency` pool tasks.
+Every member is callable from any thread, but the destructor must not race other
+callers (the group's own running tasks may keep calling it while it waits).
+`wait()`, `cancel_and_wait()`, and the destructor deadlock if called from one of
+the group's own tasks, and `wait()` needs live pool workers. The pool must outlive
+the group, and `pool.clear()` would strand a group's queued tasks.
+
 ### `Thread<ThreadImpl, ThreadPolicyType policy>`
 
 CRTP base (`thread.hh`). Derive `class Foo : public Thread<Foo, policy>` and
@@ -225,7 +267,10 @@ c++ -std=c++20 -I. test/test.cc thread.cc -o test/test && ./test/test
 
 The test submits 1000 tasks to a pool and checks all ran and summed correctly,
 resolves 50 `async` futures, and exercises `TaskQueue`'s enqueue/call/clear. It
-prints `all threadpool tests passed` and exits 0.
+prints `all threadpool tests passed` and exits 0. `test/task_group.cc` (CTest
+`task_group`) checks `TaskGroup`'s cancel, wait, close, destructor, stop token,
+self-posting, concurrency cap, and round-robin order, with promises and
+one-thread pools instead of sleeps.
 
 ## Examples
 

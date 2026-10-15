@@ -175,6 +175,40 @@ uses it for "callbacks waiting on a condition": work that is queued now and run
 later, in bulk, when a condition (a database becoming ready) is met. `clear()`'s
 bulk buffer is sized by `ConcurrentQueueDefaultTraits::BLOCK_SIZE`.
 
+## `TaskGroup`
+
+`TaskGroup<Pool>` (`task_group.hh`) layers owner-scoped cancellation and
+cross-group fairness over an unmodified `ThreadPool<std::function<void()>>`. Its
+state lives in a `shared_ptr<State>`: a mutex, a FIFO `std::deque` of boxed
+tasks, counters for tickets and running tasks, a `closed` flag, and an atomic
+`epoch`.
+
+A group never puts its tasks on the pool queue. It puts *tickets* there: a
+closure holding the `shared_ptr<State>` that pops and runs the group's oldest
+task. A group keeps at most `max_concurrency` tickets alive (default: the pool's
+thread count). After its task, a ticket requeues itself at the back of the pool
+queue if the group still has work, or retires. Because each ticket runs one task
+per trip through the pool's FIFO, groups are served round-robin, and a group with
+a thousand queued tasks occupies at most `max_concurrency` slots ahead of anyone
+else. With a one-thread pool, two busy groups alternate strictly.
+
+- `cancel()` swaps the deque out under the lock and destroys it after unlocking,
+  so dropped tasks die on the caller's thread. It bumps `epoch`; a running task's
+  `TaskGroupStopToken` compares the epoch it started under with the current one.
+  Tickets left on the pool queue find the deque empty and retire.
+- `wait()` sleeps on a condition variable until `running == 0` and the deque is
+  empty; the finishing ticket and `cancel()` notify it.
+- The destructor closes, cancels, and waits. Tickets outlive the group safely
+  because they own the state, and a closed group's deque stays empty, so a late
+  ticket never touches the pool.
+- Lock order: the pool queue's lock is never taken under the group's lock, and
+  tasks are boxed in a `unique_ptr`, so no task copy, move, or destructor runs
+  under the group's lock (a task's destructor may call into its own group).
+
+Fairness is per pool trip, not per thread: plain `pool.enqueue` work shares the
+same FIFO with the tickets. `pool.clear()` drops tickets the group still counts,
+which strands its queued tasks; don't clear a pool that groups use.
+
 ## Concurrency model
 
 The pool is many-producer, many-consumer, with all sharing mediated by the

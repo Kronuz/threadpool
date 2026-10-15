@@ -9,6 +9,7 @@ easy to fall into.
 
 ```
 threadpool.hh                 The pool: ThreadPool, ThreadPoolThread, PackagedTask, TaskWrapper, TaskQueue. Header.
+task_group.hh                 TaskGroup: owner-scoped cancel/wait over a pool, round-robin across groups. Header.
 thread.hh                     Thread<Impl,policy> CRTP base, ThreadPolicyType enum, thread-name free function decls. Header.
 thread.cc                     The only .cc: run_thread/setup_thread/set_thread_name/get_thread_name/sched_getcpu.
 blocking_concurrent_queue.h   Mutex + condvar queue the pool waits on. Header.
@@ -17,6 +18,7 @@ likely.h                      likely/unlikely macros; self-contained (no config.
 threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (stands in for Xapiand's log.h/traceback.h).
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
 test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
+test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest test `threadpool`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, usage, API reference, tracing.
@@ -108,7 +110,8 @@ name is `threadpool`.
   `THREADPOOL_THREAD_REGISTER`, or define them before including the headers. To
   recover Xapiand's behavior, map `THREADPOOL_THREAD_REGISTER` to
   `init_thread_info` and `L_EXC` to `log.h`'s macro.
-- **Always extend the smoke test.** `test/test.cc` is the only executable check.
+- **Always extend the tests.** `test/test.cc` covers the pool, `test/task_group.cc`
+  covers `TaskGroup`; they are the only executable checks.
   Any behavioral change should grow a corresponding assertion there.
 
 ## Traps

@@ -2,4 +2,5 @@ build/
 *.o
 *.out
 test/test
+test/task_group
 /tmp/
