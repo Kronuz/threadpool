@@ -73,6 +73,7 @@ class Thread {
 	std::future<void> _future;
 
 	std::atomic_bool _running;
+	std::atomic_bool _started;
 	std::atomic_bool _joined;
 
 	static void* _runner(void* arg) {
@@ -104,6 +105,7 @@ public:
 	Thread() :
 		_future(_promise.get_future()),
 		_running(false),
+		_started(false),
 		_joined(false) { }
 
 	~Thread() noexcept {
@@ -116,12 +118,14 @@ public:
 		_promise(std::move(other._promise)),
 		_future(std::move(other._future)),
 		_running(other._running.load()),
+		_started(other._started.load()),
 		_joined(other._joined.load()) {}
 
 	Thread& operator=(Thread&& other) {
 		_promise = std::move(other._promise);
 		_future = std::move(other._future);
 		_running = other._running.load();
+		_started = other._started.load();
 		_joined = other._joined.load();
 		return *this;
 	}
@@ -129,26 +133,22 @@ public:
 	void run() {
 		if (!_running.exchange(true)) {
 			_joined = false;
+			_started = true;
 			run_thread(&Thread::_runner, static_cast<ThreadImpl*>(this), thread_policy);
 		}
 	}
 
+	// Waits for the promise, never for _running: the runner clears _running before it sets
+	// the promise, and setting it reads this object, so it must outlive that.
 	bool join(std::chrono::steady_clock::time_point wakeup) {
-		if (!_joined && _running) {
-			std::future_status status;
-			do {
-				status = _future.wait_until(wakeup);
-				if (status == std::future_status::timeout) {
-					if (_running) {
-						return false;
-					}
-					_joined = true;
-					return true;
-				}
-			} while (status != std::future_status::ready);
-			if (!_joined.exchange(true)) {
-				_future.get(); // rethrow any exceptions
-			}
+		if (_joined || !_started) {
+			return true;
+		}
+		if (_future.wait_until(wakeup) == std::future_status::timeout) {
+			return false;
+		}
+		if (!_joined.exchange(true)) {
+			_future.get(); // rethrow any exceptions
 		}
 		return true;
 	}
