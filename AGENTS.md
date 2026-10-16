@@ -19,9 +19,12 @@ threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (sta
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
 test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
-CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest test `threadpool`.
+CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
-README.md                     What it is, install, usage, API reference, tracing.
+README.md                     What it is, install, quick start.
+docs/API.md                   The API reference and the tracing hooks.
+docs/threadpool.d2            The README diagram's source (docs/threadpool.svg is rendered from it).
+examples/demo.cc              A runnable tour (target threadpool_demo).
 ARCHITECTURE.md               Internal design, concurrency model, trade-offs.
 ```
 
@@ -122,7 +125,7 @@ name is `threadpool`.
   purpose so the headers work without the CMake-generated config.
 - **Don't add Xapiand headers back.** `log.h`, `strings.hh`, `traceback.h` were
   the whole point of the extraction. Route through the hooks and `std::format`.
-- **`TaskQueue::clear()` uses `ConcurrentQueueDefaultTraits::BLOCK_SIZE`.** The
+- **`TaskQueue::clear()` uses `ConcurrentQueueDefaultTraits::block_size`.** The
   Xapiand original referenced `Queue::BLOCK_SIZE`, which this `ConcurrentQueue`
   does not define; it compiled only because `clear()` was never instantiated. The
   fix here points at the trait that actually defines it. If you re-sync from
@@ -156,4 +159,4 @@ decoupling:
 The pool logic is otherwise unchanged. Keep extraction hygiene separate from
 behavior changes so they can be reconciled with upstream. To restore Xapiand's
 tracing/registration without editing these files, see "Tracing and thread
-registration" in `README.md`.
+registration" in [docs/API.md](docs/API.md).

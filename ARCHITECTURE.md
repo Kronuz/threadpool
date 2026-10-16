@@ -173,7 +173,7 @@ task and runs it with the supplied arguments (returning `false` if empty); and
 `clear()` drains the queue without running anything, returning the count. Xapiand
 uses it for "callbacks waiting on a condition": work that is queued now and run
 later, in bulk, when a condition (a database becoming ready) is met. `clear()`'s
-bulk buffer is sized by `ConcurrentQueueDefaultTraits::BLOCK_SIZE`.
+bulk buffer is sized by `ConcurrentQueueDefaultTraits::block_size`.
 
 ## `TaskGroup`
 
@@ -334,8 +334,8 @@ This repository is a standalone extraction from
   thread-naming feature macros `thread.cc` needs.
 - `TaskQueue::clear()`'s `Queue::BLOCK_SIZE` (which this `ConcurrentQueue` does
   not define, and which only compiled because `clear()` was never instantiated)
-  became `ConcurrentQueueDefaultTraits::BLOCK_SIZE`.
+  became `ConcurrentQueueDefaultTraits::block_size`.
 
 The pool logic is otherwise unchanged. The tracing and crash-registration Xapiand
 relies on are fully recoverable by injecting a trace header (see "Tracing and
-thread registration" in `README.md`).
+thread registration" in [docs/API.md](docs/API.md)).
