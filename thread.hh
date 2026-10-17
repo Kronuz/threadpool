@@ -130,12 +130,31 @@ public:
 		return *this;
 	}
 
+	// Whether a run is in progress: from run() until its routine returns.
+	bool running() const noexcept { return _running.load(); }
+
+	// Starts the thread; a no-op while it runs. After a run ends it starts again: first it
+	// joins the previous run, if join() has not, rethrowing what that run threw, then it
+	// starts with a fresh promise. One thread at a time calls run() and join().
 	void run() {
-		if (!_running.exchange(true)) {
-			_joined = false;
-			_started = true;
-			run_thread(&Thread::_runner, static_cast<ThreadImpl*>(this), thread_policy);
+		if (_running.exchange(true)) {
+			return;
 		}
+		if (_started) {
+			try {
+				if (!_joined.exchange(true)) {
+					_future.get();  // waits until the runner is done with the promise
+				}
+			} catch (...) {
+				_running = false;
+				throw;
+			}
+			_promise = std::promise<void>();
+			_future = _promise.get_future();
+		}
+		_joined = false;
+		_started = true;
+		run_thread(&Thread::_runner, static_cast<ThreadImpl*>(this), thread_policy);
 	}
 
 	// Waits for the promise, never for _running: the runner clears _running before it sets

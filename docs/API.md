@@ -64,7 +64,8 @@ the group, and `pool.clear()` would strand a group's queued tasks.
 CRTP base (`thread.hh`). Derive `class Foo : public Thread<Foo, policy>` and
 give `Foo` a `const std::string& name()` and an `operator()`. Then:
 
-- `run()` — start the thread (idempotent while running).
+- `run()` — start the thread (a no-op while it runs). After a run ends, `run()` starts it
+  again, first joining the previous run if `join()` has not, and rethrowing what it threw.
 - `join(timeout = 60s)` or `join(time_point)` — wait; rethrows any exception the
   thread's `operator()` threw.
 
