@@ -47,6 +47,7 @@ struct Job final : Task {
 	std::uint64_t posted = 0;
 	std::uint64_t started = 0;
 	std::uint64_t finished = 0;
+	bool stamp = false;  // record started and finished (two clock reads: 94 ns Mac, 62 µs VM)
 	Latch* latch = nullptr;
 	// Self-reposting background work:
 	Pool* pool = nullptr;
@@ -55,14 +56,14 @@ struct Job final : Task {
 	std::uint64_t reposts_left = 0;
 
 	Job() = default;
-	Job(const Job& o) : Task(o), work_ns(o.work_ns), latch(o.latch), pool(o.pool), running(o.running), count(o.count.load()), reposts_left(o.reposts_left) {}
+	Job(const Job& o) : Task(o), work_ns(o.work_ns), stamp(o.stamp), latch(o.latch), pool(o.pool), running(o.running), count(o.count.load()), reposts_left(o.reposts_left) {}
 };
 
 void run_once(Task* t) {
 	auto* j = static_cast<Job*>(t);
-	j->started = now_ns();
+	if (j->stamp) { j->started = now_ns(); }
 	burn(j->work_ns);
-	j->finished = now_ns();
+	if (j->stamp) { j->finished = now_ns(); }
 	if (j->latch) { j->latch->done_one(); }
 }
 
@@ -292,6 +293,7 @@ void tail(const Args& a, Pool& pool) {
 	to_done.reserve(to_start.capacity());
 	Job q;
 	q.fn = run_once;
+	q.stamp = true;
 	q.group = qg;
 	q.prio = PRIO_QUERY;
 	q.work_ns = std::uint64_t(a.query_us) * 1000;

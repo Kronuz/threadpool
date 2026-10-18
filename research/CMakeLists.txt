@@ -9,6 +9,10 @@ add_executable(research_bound bound.cc)
 target_link_libraries(research_bound PRIVATE threadpool)
 target_compile_features(research_bound PRIVATE cxx_std_20)
 
+add_executable(research_handoff handoff.cc)
+target_link_libraries(research_handoff PRIVATE threadpool)
+target_compile_features(research_handoff PRIVATE cxx_std_20)
+
 add_executable(research_workloads workloads.cc)
 target_link_libraries(research_workloads PRIVATE threadpool)
 target_compile_features(research_workloads PRIVATE cxx_std_20)

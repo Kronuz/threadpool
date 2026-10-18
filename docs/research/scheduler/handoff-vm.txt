@@ -1,0 +1,10 @@
+handoff: 8 hardware threads, futex = futex(2)
+handoff mode=spin (no sleep; the floor)                 n=20000 work_us=0 wall_per=126.8 us lat_p50=16.0 us lat_p99=426.0 us lat_p999=1114.0 us user_per=129.63 us sys_per=124.02 us vcsw_per=0.00 ivcsw_per=0.00
+handoff mode=condvar, notify_one under the lock         n=20000 work_us=0 wall_per=361.8 us lat_p50=161.0 us lat_p99=998.0 us lat_p999=2165.0 us user_per=173.41 us sys_per=237.12 us vcsw_per=1.01 ivcsw_per=0.00
+handoff mode=condvar, notify_one after unlock           n=20000 work_us=0 wall_per=338.4 us lat_p50=162.0 us lat_p99=785.0 us lat_p999=1405.0 us user_per=164.29 us sys_per=222.08 us vcsw_per=1.00 ivcsw_per=0.00
+handoff mode=condvar, wait_for 100 ms (today's pool)    n=20000 work_us=0 wall_per=374.1 us lat_p50=180.0 us lat_p99=923.0 us lat_p999=1674.0 us user_per=197.83 us sys_per=268.65 us vcsw_per=1.01 ivcsw_per=0.00
+handoff mode=std::atomic::wait / notify_one             n=20000 work_us=0 wall_per=339.9 us lat_p50=159.0 us lat_p99=929.0 us lat_p999=1668.0 us user_per=165.25 us sys_per=227.35 us vcsw_per=1.00 ivcsw_per=0.00
+handoff mode=futex(2)                                   n=20000 work_us=0 wall_per=389.6 us lat_p50=172.0 us lat_p99=959.0 us lat_p999=1972.0 us user_per=198.67 us sys_per=246.23 us vcsw_per=1.00 ivcsw_per=0.00
+timeout mode=condvar wait_for 1 ms, timing out          n=2000 wall_per=1647.4 us user_per=51.99 us sys_per=97.85 us vcsw_per=1.00 ivcsw_per=0.00
+timeout mode=nanosleep 1 ms                             n=2000 wall_per=1705.2 us user_per=42.69 us sys_per=68.16 us vcsw_per=1.00 ivcsw_per=0.00
+timeout mode=futex wait with a 1 ms timeout, timing out n=2000 wall_per=1608.4 us user_per=42.01 us sys_per=68.11 us vcsw_per=1.00 ivcsw_per=0.00

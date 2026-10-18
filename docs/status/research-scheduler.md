@@ -68,13 +68,22 @@
   - The bound on the gate VM (`fa9be5a`, `bound-vm.txt`): queue operations within 1.5× of
     the Mac's; a clock read 31 µs and a futex wake 0.4 ms median, 2 ms p99, because HVF
     exposes no stable TSC and the guest runs on `hpet` (note section 2).
-- Doing: the background driver `.scratch/drive.sh`: the Mac `tiny` rerun with the per-task
-  stamps off (they were 94 ns of the 46 to 140 ns per task; on the VM 62 µs), then the VM
-  halves (`sched-vm-a`: tiny, idle, memory; `sched-vm-b`: tail, makespan), each under its own
-  strict hold of 5 to 9 minutes, then the copy back to `docs/research/scheduler/*-vm.txt`.
+  - The Mac `tiny` rerun with the per-task stamps off (`sched-mac-tiny2`; the stamps were
+    94 ns of the 46 to 140 ns per task, and 62 µs on the VM): section 5.1 refreshed.
+  - The coordinator's FreeBSD probe (`research/handoff.cc`, `handoff-{mac,freebsd,vm}.txt`,
+    light holds): per wake of a sleeping worker, macOS 3 to 4 µs of kernel time for every
+    primitive; FreeBSD 16 to 20 µs for an untimed condvar, 37 µs for `_umtx_op`, 98.5 µs for
+    the 100 ms timed condvar wait today's worker uses, and `std::atomic::wait` spinning 268 µs
+    of user time; section 5.6, and the corrections at the top of section 6 (untimed futex per
+    worker, `sleep_until` on one timed futex wait, cancel returns items, narrow `help_until`,
+    cycle-counter time, the ticket invariant, defaults).
+- Doing: the background driver `.scratch/drive2.sh`: the FreeBSD reruns (light), then the gate
+  VM halves (`sched-vm-a` light: tiny at 200k tasks, idle, memory, three trials; `sched-vm-b`
+  strict 4 min: tail at 2 s and makespan, two trials), then the copy back.
 - Next:
-  1. Summarize the VM files, fill section 5.5 and refresh 5.1's Mac numbers; tick K1, K4, K5.
-  2. Commit, push, re-dispatch CI on the final commit; green ticks K6.
+  1. FreeBSD rerun numbers into 5.6 (the `_umtx_op` variance and the timed-sleep row), the
+     VM tables into 5.5; tick K1, K4, K5.
+  2. Commit, push, re-dispatch CI on the final commit; green ticks K6. Then stop.
 - Blocked on: nothing. For the lead: the gate VM's `hpet` clocksource (31 µs per
   `clock_gettime`, 0.4 ms wakes) taxes every per-task timestamp in strata's VM harnesses and
   makes the VM unfit for latency floors; worth `clocksource=` work or bare metal for those rows.

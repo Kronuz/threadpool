@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <ctime>
 
 #if defined(__linux__)
 #include <linux/futex.h>
@@ -44,6 +45,29 @@ inline void futex_wait(std::atomic<std::uint32_t>* addr, std::uint32_t expected)
 	_umtx_op(addr, UMTX_OP_WAIT_UINT_PRIVATE, expected, nullptr, nullptr);
 #else
 	addr->wait(expected);
+#endif
+}
+
+// Blocks while *addr == expected, for at most `ns` (a timed sleep that may time out).
+inline void futex_wait_for(std::atomic<std::uint32_t>* addr, std::uint32_t expected, std::uint64_t ns) noexcept {
+#if defined(__linux__)
+	timespec ts{static_cast<time_t>(ns / 1'000'000'000ULL), static_cast<long>(ns % 1'000'000'000ULL)};
+	syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, &ts, nullptr, 0);
+#elif defined(__APPLE__) && defined(RESEARCH_HAVE_OS_SYNC)
+	os_sync_wait_on_address_with_timeout(addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME, ns);
+#elif defined(__APPLE__)
+	__ulock_wait(1 | 0x01000000, addr, expected, static_cast<std::uint32_t>(ns / 1000));
+#elif defined(__FreeBSD__)
+	struct _umtx_time tm{};
+	tm._timeout.tv_sec = static_cast<time_t>(ns / 1'000'000'000ULL);
+	tm._timeout.tv_nsec = static_cast<long>(ns % 1'000'000'000ULL);
+	tm._flags = 0;  // relative
+	tm._clockid = CLOCK_MONOTONIC;
+	_umtx_op(addr, UMTX_OP_WAIT_UINT_PRIVATE, expected, reinterpret_cast<void*>(sizeof tm), &tm);
+#else
+	(void)addr; (void)expected;
+	timespec ts{static_cast<time_t>(ns / 1'000'000'000ULL), static_cast<long>(ns % 1'000'000'000ULL)};
+	nanosleep(&ts, nullptr);
 #endif
 }
 

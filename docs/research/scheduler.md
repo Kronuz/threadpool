@@ -338,41 +338,43 @@ parking.
 
 ### 5.1 Tiny tasks (K4: throughput)
 
-One external producer posting 500,000 empty tasks round robin over the groups:
+One external producer posting 500,000 empty tasks round robin over the groups (the rerun
+without per-task timestamps, `sched-mac-tiny2`):
 
 | pool | 1 group: ns/task wall, CPU | 1,000 groups | 10,000 groups |
 |---|---|---|---|
-| baseline | 1,978 / 24,032 | 7,009 / 20,200 | 8,225 / 22,603 |
-| raw | 6,827 / 19,590 | 7,040 / 20,388 | 7,831 / 22,397 |
-| steal (D-A) | 124 / 1,695 | 138 / 1,856 | 130 / 1,793 |
-| groups (D-B) | 545 / 6,188 | 46 / 659 | 135 / 1,509 |
-| prio-r1 (D-C) | 517 / 6,144 | 110 / 1,375 | 154 / 1,800 |
-| home (D-D) | 111 / 1,228 | 495 / 1,688 | 616 / 2,379 |
-| taskflow | 221 / 2,828 | 228 / 2,532 | 222 / 2,600 |
-| moodycamel | 1,341 / 9,838 | 1,357 / 8,728 | 1,440 / 9,383 |
+| baseline | 2,136 / 22,664 | 7,655 / 20,792 | 7,544 / 20,617 |
+| raw | 6,894 / 19,254 | 7,008 / 19,585 | 7,092 / 19,847 |
+| steal (D-A) | 153 / 2,171 | 159 / 2,118 | 174 / 2,626 |
+| groups (D-B) | 633 / 7,482 | 138 / 1,711 | 158 / 1,798 |
+| prio-r1 (D-C) | 540 / 6,253 | 157 / 1,950 | 171 / 2,052 |
+| home (D-D) | 94 / 710 | 506 / 1,387 | 619 / 1,773 |
+| taskflow | 217 / 2,775 | 218 / 2,845 | 220 / 2,871 |
+| moodycamel | 1,584 / 10,046 | 1,359 / 9,099 | 1,566 / 10,026 |
 
 Four producers, 1,000 groups, empty tasks and 1 µs tasks (wall ns/task; the 1 µs column's
 floor is 1,000/16 = 62 ns):
 
 | pool | 4 producers, empty | 4 producers, 1 µs | chained (worker-local re-post) ns/task, CPU |
 |---|---|---|---|
-| baseline | 8,419 | 8,692 | |
-| raw | 5,010 | 1,777 | |
-| steal | 153 | 114 | 2.7 / 35 |
-| steal-lifo | | | 3.1 / 41 |
-| groups | 47 | 96 | 12.6 / 163 |
-| prio-r1 | 67 | 108 | 12.4 / 159 |
-| home | 535 | 94 | 10.1 / 127 |
-| taskflow | 127 | 166 | 67.7 / 859 |
-| moodycamel | 145 | 146 | 166 / 1,789 |
+| baseline | 9,410 | 8,855 | |
+| raw | 7,262 | 1,766 | |
+| steal | 166 | 122 | 3.4 / 49 |
+| steal-lifo | | | 3.7 / 49 |
+| groups | 116 | 99 | 10.5 / 162 |
+| prio-r1 | 126 | 104 | 11.6 / 165 |
+| home | 744 | 92 | 10.7 / 151 |
+| taskflow | 139 | 189 | 76 / 1,062 |
+| moodycamel | 163 | 143 | 144 / 1,753 |
 
-Reading: today's pool costs 7 to 9 µs of wall and 20 to 60 µs of CPU per external tiny task,
-all of it the condvar wake per enqueue (the queue itself is 41 ns); every candidate is 50 to
-150× cheaper and all beat both references. `groups` leads with many groups (46 ns at 1,000:
-the per-group spinlock spreads contention; at one group every worker hits one lock and it
-falls to 545 ns, where `steal` and `home` are 4 to 5× faster). Worker-local continuations
-through the LIFO slot cost 2.7 ns. At 1 µs tasks every candidate is within 90 to 120 ns of
-each other.
+Reading: today's pool costs 7 to 9 µs of wall and 20 to 23 µs of CPU per external tiny task
+(70 µs of CPU with four producers contending on its mutex), all of it the condvar wake per
+enqueue (the queue itself is 41 ns); every candidate is 40 to 70× cheaper in wall and 8 to 30×
+in CPU, and all beat both references. With many groups `groups`, `prio`, and `steal` are
+within 138 to 174 ns of each other; at one group every worker hits that group's one spinlock
+and `groups` falls to 633 ns, where `steal` (153) and `home` (94) are 4 to 7× faster.
+Worker-local continuations through the LIFO slot cost 3.4 ns. At 1 µs tasks every candidate is
+within 92 to 122 ns of each other, and the pool's cost no longer matters.
 
 ### 5.2 The latency tail of a query piece on a saturated pool (K4)
 
@@ -473,7 +475,92 @@ design: 10,000 groups are 1.3 to 2.8 MB, not a factor.
 
 (`*-vm.txt`; 8 vCPUs, Linux 6.8, g++ 13; filled from the VM runs.)
 
+### 5.6 The FreeBSD finding: what a wake and a timed sleep cost per call
+
+strata's perf/index-size found that one background merge thread (today's `ThreadPool<>` with
+one worker, through `pool_executor`) costs 14% more CPU and nearly three times the kernel time
+on FreeBSD 14.4 at 500k documents, and not on Linux or macOS. `research_handoff` measures the
+pieces: a producer signals a sleeping worker, the worker wakes, acknowledges, and sleeps again
+(20,000 handoffs; the producer spins, like an indexing thread); `getrusage` gives the user and
+kernel time per handoff, `now_ns` the signal-to-running latency. Then 2,000 timed sleeps of 1 ms
+that time out, what a `sleep_until` pays per call. Light holds, two threads
+(`handoff-mac.txt`, `handoff-freebsd.txt`, `handoff-freebsd-reruns.txt`, `handoff-vm.txt`).
+
+| per handoff | macOS 15 (Mac): sys / user µs, cs | FreeBSD 14.4 (VM, 4 vCPUs): sys / user µs, cs | latency p50 FreeBSD |
+|---|---|---|---|
+| spin, no sleep (the floor) | 0.09 / 40.7, 0 | 0.39 / 117.5, 0 | 9 µs |
+| condvar, `notify_one` under the lock | 3.46 / 28.4, 1.0 | 15.8 / 96.1, 1.0 | 41 µs |
+| condvar, `notify_one` after unlock | 3.57 / 28.7, 1.0 | 20.3 / 98.9, 1.0 | 42 µs |
+| condvar `wait_for` 100 ms (today's pool worker) | 4.07 / 29.3, 1.0 | **98.5** / 271, 1.8 | 150 µs |
+| `std::atomic::wait` / `notify_one` | 3.14 / 31.7, 1.0 | 5.7 / **268**, 2.3 | 27 µs |
+| raw futex (`os_sync_wait_on_address`; `_umtx_op`) | 3.13 / 27.6, 1.0 | 36.9 / 102.8, 1.0 | 59 µs |
+
+| per timed sleep of 1 ms that times out | macOS: sys / user µs | FreeBSD: sys / user µs |
+|---|---|---|
+| condvar `wait_for` | 8.6 / 5.4 | (reruns) |
+| `nanosleep` | 7.0 / 3.3 | (reruns) |
+| futex with a timeout | 6.5 / 1.5 | (reruns) |
+
+Reading: on macOS a wake is 3 to 4 µs of kernel time whatever the primitive; on FreeBSD an
+untimed condvar wake is 16 to 20 µs, the raw `_umtx_op` 37 µs (one run; the reruns will say
+whether that holds), and a **timed** condvar wake 98.5 µs with 1.8 context switches, five times
+the untimed one. `std::atomic::wait` shows the lowest kernel time there (5.7 µs) because
+FreeBSD's libc++ spins and yields first: 268 µs of user time and 2.3 switches per wake, which is
+why correction 1 says the raw call. The user-time columns include the producer's spinning.
+
+What it says about the finding: a merge is handed off once, so the wake itself (37 against
+4 µs) cannot sum to seconds over a few hundred merges. The timed waits can: today's worker
+re-checks shutdown every 100 ms (10 wakes a second, negligible), but `pool_executor::
+sleep_until` is a timed condvar wait per call, and the merge path calls it from the rate
+limiter and in 10 ms steps, so each call costs about 100 µs of FreeBSD kernel time where the
+inline merge (an `inline_executor`, whose clock is virtual) sleeps for free. R1 as corrected
+(an untimed futex per worker, sleeps through one timed futex wait for the whole interval)
+removes both; whether it removes the whole 3× is for the developer to count: the number of
+`sleep_until` and `checkpoint` calls in a 500k run times the per-call costs above. The
+Linux gate VM's run (`handoff-vm.txt`) is unusable for this question: its spin floor alone
+shows 124 µs of kernel time per handoff, the hpet clock reads of section 2.
+
 ## 6. Recommendations
+
+### Corrections to the sketch (read first; they came from the FreeBSD probe and the reruns)
+
+1. **The worker's wait is an untimed platform futex, never `std::atomic::wait` and never a
+   timed wait.** Use `futex(2)` on Linux, `os_sync_wait_on_address` on macOS 14.4+, and
+   `_umtx_op(UMTX_OP_WAIT_UINT_PRIVATE)` on FreeBSD (`research/futex.hh` has the three).
+   FreeBSD's libc++ `atomic::wait` spins and yields before it blocks: 268 µs of user time and
+   2.3 context switches per wake against 103 µs and 1.0 for the raw call (5.6). A timed
+   condvar wait, today's `wait_dequeue_timed(100 ms)`, costs 98.5 µs of kernel time per wake
+   on FreeBSD against 16 to 20 µs untimed (macOS: 4.1 against 3.5). Shutdown unparks every
+   sleeper explicitly (the prototypes' `notify_all`); no worker ever wakes on a timer.
+2. **`WorkPool` gets `sleep_until(deadline, WorkGroup&)` for the executor**, built on the futex
+   with a timeout (`futex_wait_for` in `research/futex.hh`; on FreeBSD the `_umtx_time`
+   form), woken early by the group's cancel through the same word. strata's
+   `pool_executor::sleep_until` is a timed condvar wait per call, and the merge path calls it
+   from the rate limiter (`rate_limiter.hh:34`) and in 10 ms steps (`index.hh:1097`): that,
+   not the one wake per merge, is where FreeBSD's kernel time can go (section 5.6 has the
+   per-call costs). Sleep once for the whole interval; the stop request ends it.
+3. **Cancel does not run items.** `WorkGroup::cancel()` unlinks the queued items and hands
+   them back on an intrusive list (`WorkItem* cancel() noexcept`, through `next`), so the owner
+   frees or recycles them; running items observe `stop_requested()` as today's stop token.
+   The sketch's "returned through item->run with stop set" is withdrawn.
+4. **`help_until` helps narrowly.** A worker waiting inside `WorkGroup::wait()` runs only its
+   own group's queued items (any class) and other groups' query-class items; it never runs
+   another group's flush or merge item while waiting, since those may wait in turn. That is
+   the whole nested-wait rule; bisection's "never wait for an unstarted helper" becomes
+   unnecessary.
+5. **Time inside the pool is the cycle counter**, calibrated once (Kronuz/task's
+   `cycles::calibrate()` or `research/common.hh`'s `cycles_per_ns`), never `steady_clock`: the
+   quantum accounting reads time per task, and a clock read is 31 µs on the gate VM (section
+   2). The 200 µs inject interval of D-A and the 100 µs quantum of D-B both use it.
+6. **Tickets, stated as the invariant to test:** a group with queued work holds exactly one
+   ticket, plus up to `min(width, pending) - 1` more granted one per quantum only while
+   `unparked < threads - reserve_for_its_class`; a ticket is dropped when a serve finds the
+   group empty. The ready-list is a ring sized `threads × open groups` entries (8 bytes each:
+   13 MB at 100,000 groups), so a post never blocks on it.
+7. Defaults: `reserve = 1`, `merge_cap = threads - reserve`, `quantum = 100 µs`, FIFO owner
+   order everywhere (a LIFO slot only for same-group continuations, capped at 3 polls).
+   `reserve = 2` bought p50 12 to 28 µs against 30 to 40 (5.2) at one more idle core; the
+   host chooses.
 
 The three, in the order to build them; each is additive to `threadpool` (Detent links the
 library through `scheduler` and keeps `ThreadPool<TaskType, thread_policy>`, which does not
