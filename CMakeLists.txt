@@ -82,6 +82,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(work_pool_test PRIVATE threadpool)
   add_test(NAME work_pool COMMAND work_pool_test)
 
+  add_executable(work_group_test test/work_group.cc)
+  target_link_libraries(work_group_test PRIVATE threadpool)
+  add_test(NAME work_group COMMAND work_group_test)
+
   # A runnable tour of the library (not a test): build & run ./build/threadpool_demo
   add_executable(threadpool_demo examples/demo.cc)
   target_link_libraries(threadpool_demo PRIVATE threadpool)

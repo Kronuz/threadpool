@@ -1,0 +1,16 @@
+workloads: idle threads=16 trials=5 pools=baseline,groups,workpool,
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.5390% (of one core) context_switches_per_s=351.6
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0011% (of one core) context_switches_per_s=0.3
+idle pool=workpool       workers=16 seconds=3.0 cpu=0.0015% (of one core) context_switches_per_s=0.3
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.4719% (of one core) context_switches_per_s=286.8
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0012% (of one core) context_switches_per_s=0.3
+idle pool=workpool       workers=16 seconds=3.0 cpu=0.0011% (of one core) context_switches_per_s=0.3
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.6268% (of one core) context_switches_per_s=452.0
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0010% (of one core) context_switches_per_s=0.3
+idle pool=workpool       workers=16 seconds=3.0 cpu=0.0010% (of one core) context_switches_per_s=0.3
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.4780% (of one core) context_switches_per_s=321.1
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0015% (of one core) context_switches_per_s=0.7
+idle pool=workpool       workers=16 seconds=3.0 cpu=0.0012% (of one core) context_switches_per_s=0.3
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.5451% (of one core) context_switches_per_s=370.8
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0013% (of one core) context_switches_per_s=0.3
+idle pool=workpool       workers=16 seconds=3.0 cpu=0.0009% (of one core) context_switches_per_s=0.3
