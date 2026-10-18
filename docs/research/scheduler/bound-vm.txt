@@ -1,0 +1,26 @@
+bound: 8 hardware threads, futex = futex(2), 2000000 iterations
+bound: churn rate 0.335 iterations/ns
+bound steady_clock::now()                                 31006.3 ns
+bound std::mutex lock + unlock, uncontended                  20.5 ns
+bound atomic fetch_add relaxed, one thread                   10.6 ns
+bound atomic fetch_add seq_cst, one thread                   12.0 ns
+bound atomic CAS (success), one thread                       19.6 ns
+bound atomic_thread_fence(seq_cst)                           12.5 ns
+bound mutex + std::deque push_back + pop_front               46.6 ns
+bound Chase-Lev push + pop (owner, LIFO)                     34.6 ns
+bound Chase-Lev push + steal (same thread, FIFO)             32.6 ns
+bound bounded MPMC ring push + pop, one thread               32.9 ns
+bound std::function assign (24-byte capture) + call          63.2 ns
+bound make_unique<std::function> (TaskGroup's box)           45.0 ns
+bound sched_yield()                                        1241.9 ns
+bound syscall floor (getppid)                               878.0 ns
+bound cross-core line round trip (spin, 2 threads)          328.3 ns
+bound futex ping-pong round trip (both sleep)            958807.1 ns
+wake latency: std::condition_variable notify_one n=3000     min=37.0 us    p50=397.0 us   p90=1078.9 us  p99=1761.9 us  p99.9=2726.8 us  max=3793.7 us  mean=536.6 us
+wake latency: std::atomic<uint32_t>::wait/notify_one n=3000     min=37.0 us    p50=444.0 us   p90=1158.9 us  p99=2264.8 us  p99.9=3923.7 us  max=6049.5 us  mean=599.0 us
+wake latency: futex(2) wake                  n=3000     min=32.0 us    p50=439.0 us   p90=1133.9 us  p99=1975.8 us  p99.9=3433.7 us  max=4718.6 us  mean=581.3 us
+bound SPSC handoff: mutex + std::deque (today's queue)       88.1 ns
+bound SPSC handoff: bounded MPMC ring (Vyukov)               24.1 ns
+bound SPSC handoff: Chase-Lev push / steal                   72.0 ns
+bound MPMC 4x4 contended: mutex + std::deque                125.8 ns
+bound MPMC 4x4 contended: bounded MPMC ring (Vyukov)        105.2 ns

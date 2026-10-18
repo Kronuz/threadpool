@@ -52,33 +52,43 @@ pool burns 0.35 to 0.47% of a core on 100 ms timeouts).
 What the hardware and the kernels charge for the pieces a scheduler is made of
 (`research_bound`, light hold; `bound-mac.txt`, `bound-vm.txt`).
 
-| Primitive | Mac (macOS 15, x86_64) | VM (Linux 6.8, x86_64) |
+| Primitive | Mac (macOS 15, x86_64) | gate VM (Linux 6.8, QEMU/HVF) |
 |---|---|---|
-| `steady_clock::now()` | 47 ns | see `bound-vm.txt` |
-| `std::mutex` lock + unlock, uncontended | 20 ns | |
-| atomic `fetch_add` (relaxed = seq_cst on x86) | 4.9 ns | |
-| atomic CAS, success | 8.7 ns | |
-| mutex + `std::deque` push + pop (today's queue) | 41 ns | |
-| Chase-Lev push + pop (owner) / push + steal | 23 ns / 23 ns | |
-| bounded MPMC ring push + pop | 20 ns | |
-| `std::function` assign (24-byte capture) + call | 17 ns | |
-| syscall floor (`getppid`) / `sched_yield` | 436 ns / 896 ns | |
-| cross-core cache-line round trip (two spinning threads) | 139 ns | |
-| SPSC handoff per item: mutex+deque / MPMC ring / Chase-Lev steal | 85 / 12 / 59 ns | |
-| MPMC 4 producers × 4 consumers per item: mutex+deque / ring | 186 / 124 ns | |
-| futex ping-pong round trip, both threads sleeping | 11.4 µs | |
-| wake a sleeping thread, condvar: p50 / p99 / p99.9 | 10.7 / 77 / 303 µs | |
-| wake, `std::atomic::wait` + `notify_one` | 10.0 / 63 / 259 µs | |
-| wake, raw futex (`os_sync_wait_on_address`; `futex(2)` on Linux) | 9.9 / 64 / 316 µs | |
+| `steady_clock::now()` | 47 ns | **31.0 µs** (clocksource `hpet`; see below) |
+| `std::mutex` lock + unlock, uncontended | 20 ns | 21 ns |
+| atomic `fetch_add` relaxed / seq_cst | 4.9 / 4.9 ns | 10.6 / 12.0 ns |
+| atomic CAS, success | 8.7 ns | 19.6 ns |
+| mutex + `std::deque` push + pop (today's queue) | 41 ns | 47 ns |
+| Chase-Lev push + pop (owner) / push + steal | 23 / 23 ns | 35 / 33 ns |
+| bounded MPMC ring push + pop | 20 ns | 33 ns |
+| `std::function` assign (24-byte capture) + call | 17 ns | 63 ns |
+| syscall floor (`getppid`) / `sched_yield` | 436 / 896 ns | 878 / 1,242 ns |
+| cross-core cache-line round trip (two spinning threads) | 139 ns | 328 ns |
+| SPSC handoff per item: mutex+deque / MPMC ring / Chase-Lev steal | 85 / 12 / 59 ns | 88 / 24 / 72 ns |
+| MPMC 4 producers × 4 consumers per item: mutex+deque / ring | 186 / 124 ns | 126 / 105 ns |
+| futex ping-pong round trip, both threads sleeping | 11.4 µs | 959 µs |
+| wake a sleeping thread, condvar: p50 / p99 / p99.9 | 10.7 / 77 / 303 µs | 397 / 1,762 / 2,727 µs |
+| wake, `std::atomic::wait` + `notify_one` | 10.0 / 63 / 259 µs | 444 / 2,265 / 3,924 µs |
+| wake, raw futex (`os_sync_wait_on_address`; `futex(2)`) | 9.9 / 64 / 316 µs | 439 / 1,976 / 3,434 µs |
 
-What it says: every queue operation is 12 to 85 ns and the fastest (the ring) is 7× cheaper
-than today's mutex-and-deque; but **waking a thread is 10 µs at the median and 60 to 80 µs at
-p99, whatever the primitive**: the condvar, the C++20 atomic wait, and the raw futex all end
-in the same kernel path, and the cost is the scheduler's, not the API's. So a pool that wakes a
-worker per task pays 100× the queue's cost in CPU, and a query that needs a *sleeping* worker
-cannot see a p99 under ~70 µs on this host. The design levers are therefore: wake rarely (a
-worker that is awake and searching takes the task; a sleeper is woken only when none is), and
-keep a worker awake for the latency class when it is worth a core.
+What it says: every queue operation is 12 to 88 ns and the fastest (the ring) is 4 to 7×
+cheaper than today's mutex-and-deque; but **waking a thread is 10 µs at the median and 60 to
+80 µs at p99 on the Mac, whatever the primitive**: the condvar, the C++20 atomic wait, and the
+raw futex all end in the same kernel path, and the cost is the scheduler's, not the API's. So a
+pool that wakes a worker per task pays 100× the queue's cost in CPU, and a query that needs a
+*sleeping* worker cannot see a p99 under ~70 µs on this host. The design levers are therefore:
+wake rarely (a worker that is awake and searching takes the task; a sleeper is woken only
+when none is), and keep a worker awake for the latency class when it is worth a core.
+
+**The gate VM is not a machine for latency floors.** HVF exposes no stable TSC, so the guest
+kernel runs on `hpet` (`/sys/.../current_clocksource`; `available_clocksource` lists only
+`hpet acpi_pm`) and every `clock_gettime` is a trapped MMIO read: 31 µs. A vCPU that halts is
+woken through the hypervisor: 0.4 ms at the median, 2 ms at p99, with three other agents'
+single-threaded jobs live on the same 8 vCPUs during the run (load average 9.5). Both numbers
+are the platform's, not the pool's; the VM tables in 5.5 compare pools against each other
+under the same handicap. Two consequences for the project: any harness that timestamps per
+task in the VM pays 62 µs per pair (strata's per-query timing included), and a scheduler's
+wake latency should be gated on bare metal (the Mac, the FreeBSD box, or the M1's successor).
 
 ## 3. Survey
 
