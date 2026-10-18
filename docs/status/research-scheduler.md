@@ -4,7 +4,7 @@
   engineer or designer to build from. Reviews: none yet.
 - Branch / worktree: `research/scheduler` at `~/code/Kronuz/threadpool-wt/research`, from
   `origin/main` at `628679a`.
-- State: in review (the note is delivered; K1 to K5 met, K6 on the final commit's CI run)
+- State: in review (the note is delivered; K1 to K6 met; the lead decides what lands)
 - Done criteria (set by the lead; contributors tick, never edit):
   - [x] K1 The bound: per-task overhead and wake-latency floors on this hardware (enqueue
     and dequeue in ns, an idle worker's wake in µs, futex or ulock against a condition
@@ -45,11 +45,12 @@
     additive API sketch for threadpool (Detent keeps compiling), and what strata's executor
     and reactor's offload would change to use it: sections 1 to 7, with the corrections to
     the sketch at the top of section 6 (eight, from the FreeBSD probe and the gate-VM hang).
-  - [ ] K6 The branch pushed, CI green on all jobs: pushed at `3dd1261`; run 39111176813
-    (`workflow_dispatch`; CI runs only on main, PRs, and dispatch) green on all 8 jobs
-    (freebsd-x86_64, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-gcc,
-    linux-x86_64-clang, linux-tsan, macos-arm64, macos-x86_64) in 1m24s. To re-dispatch on
-    the final commit once the VM tables land.
+  - [x] K6 The branch pushed, CI green on all jobs: run 39137948331 (`workflow_dispatch`;
+    CI runs only on main, PRs, and dispatch) on the final code commit `d112fde`, success on
+    all 8 jobs (freebsd-x86_64, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-gcc,
+    linux-x86_64-clang, linux-tsan, macos-arm64, macos-x86_64); the earlier run 39111176813
+    at `3dd1261` was green too. The research tree is off by default, so CI proves the library
+    unchanged; the research code's own checks are the Mac and VM runs and TSan in the note.
 - Done:
   - The scaffolding (`03b0869`): `research/` with the queues (Chase-Lev with the PPoPP 2013
     orders, Vyukov's bounded MPMC), the futex layer (Linux futex, macOS
