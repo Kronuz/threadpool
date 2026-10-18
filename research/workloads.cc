@@ -51,8 +51,11 @@ struct Job final : Task {
 	// Self-reposting background work:
 	Pool* pool = nullptr;
 	const std::atomic<bool>* running = nullptr;
-	std::uint64_t count = 0;
+	std::atomic<std::uint64_t> count{0};  // read by the harness while the workers count
 	std::uint64_t reposts_left = 0;
+
+	Job() = default;
+	Job(const Job& o) : Task(o), work_ns(o.work_ns), latch(o.latch), pool(o.pool), running(o.running), count(o.count.load()), reposts_left(o.reposts_left) {}
 };
 
 void run_once(Task* t) {
@@ -67,7 +70,7 @@ void run_once(Task* t) {
 void run_again(Task* t) {
 	auto* j = static_cast<Job*>(t);
 	burn(j->work_ns);
-	++j->count;
+	j->count.fetch_add(1, std::memory_order_relaxed);
 	bool more = j->running ? j->running->load(std::memory_order_relaxed) : j->reposts_left-- > 0;
 	if (more) {
 		j->pool->post(j);
@@ -257,8 +260,8 @@ struct Background {
 	}
 	std::uint64_t completed() const {
 		std::uint64_t n = 0;
-		for (auto& j : flushes) { n += j.count; }
-		for (auto& j : merges) { n += j.count; }
+		for (auto& j : flushes) { n += j.count.load(std::memory_order_relaxed); }
+		for (auto& j : merges) { n += j.count.load(std::memory_order_relaxed); }
 		return n;
 	}
 	// Jain's fairness index over the busy groups' completed flush counts.
@@ -268,7 +271,7 @@ struct Background {
 		double sum = 0, sq = 0;
 		for (std::size_t g = 0; g < busy; ++g) {
 			double c = 0;
-			for (unsigned k = 0; k < outstanding; ++k) { c += double(flushes[g * outstanding + k].count); }
+			for (unsigned k = 0; k < outstanding; ++k) { c += double(flushes[g * outstanding + k].count.load(std::memory_order_relaxed)); }
 			sum += c;
 			sq += c * c;
 		}

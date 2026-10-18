@@ -4,29 +4,39 @@
   engineer or designer to build from. Reviews: none yet.
 - Branch / worktree: `research/scheduler` at `~/code/Kronuz/threadpool-wt/research`, from
   `origin/main` at `628679a`.
-- State: implementing
+- State: implementing (the Mac half measured and written; the gate VM runs in progress)
 - Done criteria (set by the lead; contributors tick, never edit):
   - [ ] K1 The bound: per-task overhead and wake-latency floors on this hardware (enqueue
     and dequeue in ns, an idle worker's wake in µs, futex or ulock against a condition
-    variable), on the Mac (x86_64) and the strata gate VM.
-  - [ ] K2 A survey, reading source freely: work-stealing deques (Chase-Lev and its C11
+    variable), on the Mac (x86_64) and the strata gate VM. Mac done
+    (`docs/research/scheduler/bound-mac.txt`, note section 2); VM running.
+  - [x] K2 A survey, reading source freely: work-stealing deques (Chase-Lev and its C11
     memory ordering), Tokio's scheduler (LIFO slot, inject queue, budget), Go's runtime
     (P/M/G, netpoll), oneTBB arenas, Taskflow, folly's CPUThreadPoolExecutor and LifoSem,
     Rayon, Seastar's shared-nothing per-core design, io_uring as a completion source, and
-    fair queuing across groups (DRR, stride scheduling).
-  - [ ] K3 At least three designs prototyped under `research/` (off by default) and
+    fair queuing across groups (DRR, stride scheduling): note section 3, with the constants
+    and quotes from each source (Tokio `queue.rs`, `idle.rs`, `stats.rs`, `worker.rs`; Go
+    `proc.go`; Rayon `sleep/mod.rs` and README; folly `LifoSem.h`, `ThrottledLifoSem.h`,
+    `CPUThreadPoolExecutor.h`; Taskflow `executor.hpp`, `wsq.hpp`, `atomic_notifier.hpp`;
+    oneTBB `arena.h`, `arena_slot.h`; Seastar `scheduling.hh`, `reactor.cc`; Eigen
+    `EventCount.h`; Lê et al. PPoPP 2013; the io_uring wiki; Apple's `os_sync_wait_on_address`).
+  - [x] K3 At least three designs prototyped under `research/` (off by default) and
     microbenchmarked against today's pool and the fastest open implementation buildable
     here: per-core deques with stealing; per-group queues with a ready-list and DRR across
     groups; priority classes; and one that breaks an assumption (tasks pinned to the core
-    that owns the index's arena).
+    that owns the index's arena): `research/pools.hh` (`steal`, `groups`, `prio`, `home`,
+    plus today's `baseline` and `raw`, Taskflow 3.10, and moodycamel 1.0.4), note sections
+    4 and 5; TSan (Homebrew LLVM 23) clean on every candidate over every workload.
   - [ ] K4 The workloads measured with one hot group, 1,000 busy groups, and 10,000 groups
     mostly idle: tiny-task throughput; p50, p99, p99.9 of a query-class task while flushes
     and merges saturate the pool; one index's flush makespan alone against beside 1,000
-    others; CPU when idle (about zero); memory per group.
+    others; CPU when idle (about zero); memory per group. Mac done (note section 5,
+    `*-mac.txt`, medians of three interleaved trials under strict holds); VM running.
   - [ ] K5 `docs/research/scheduler.md`: the bound, the survey with sources, each idea with
     its prototype result, and the top 3 recommendations, each with prototype numbers, an
     additive API sketch for threadpool (Detent keeps compiling), and what strata's executor
-    and reactor's offload would change to use it.
+    and reactor's offload would change to use it. Written with the Mac numbers (sections 2
+    to 6); the VM tables (2 and 5.5) pending.
   - [ ] K6 The branch pushed, CI green on all jobs.
 - Done:
   - The scaffolding (`03b0869`): `research/` with the queues (Chase-Lev with the PPoPP 2013
@@ -40,17 +50,27 @@
     260–315 µs, the same through condvar, `atomic::wait`, and the raw call; futex ping-pong
     11.4 µs per round trip.
   - The survey and the designs drafted in `docs/research/scheduler.md` (sections 1, 3, 4).
-- Doing: smoke-testing every workload on every pool (correctness, no timing claims), then a
-  TSan build of the harness with Homebrew LLVM.
+  - Mac matrix (`0b05da8`): `tiny` (1 / 1,000 / 10,000 groups, 1 and 4 producers, empty and
+    1 µs tasks, chained), `tail` (1 hot / 1,000 busy / 10,000 with 100 busy, four merges),
+    `makespan` (1,000 and 100 peers), `idle`, `memory`; strict holds `sched-mac-tiny` and
+    `sched-mac-tail`, three interleaved trials; TSan clean after the harness's stats counter
+    became atomic (the only reports).
+  - Harness faults found by the first runs and fixed: LIFO owner pop (fairness 0.31) → FIFO;
+    inject check every 61 tasks (61 ms at 1 ms tasks) → every 200 µs by the cycle counter;
+    the priority pool's fan-out counting the reserved worker as idle; the spin phase
+    registering the spinner as a sleeper (a wake syscall per post).
+  - The note's sections 1 to 6 with the Mac numbers; `research/summarize.py` builds the
+    median tables from the raw files.
+- Doing: the gate VM runs (`sched-vm-bound` light, then `sched-vm-tiny` and the tail /
+  makespan half under strict holds of at most 10 minutes), then their tables into sections 2
+  and 5.5.
 - Next:
-  1. TSan over `tiny` and `tail` for each candidate.
-  2. Mac measurements: `tiny` (1 / 1,000 / 10,000 groups; external and chained), `tail`
-     (1 hot, 1,000 busy, 10,000 mostly idle; with merges), `makespan`, `idle`, `memory`;
-     strict holds of at most 10 minutes each, interleaved, 3 to 5 trials.
-  3. The gate VM (after `si-m0` ends at 01:01): sync, build, the bound and the workloads.
-  4. Fill sections 2, 5, 6 of the note; tick K1 to K5; push; `gh workflow run ci.yml` (K6).
-- Blocked on: nothing (light hold `si-m0` until 01:01 limits builds to nice 19 and 4 jobs, and
-  keeps me off the gate VM until then).
+  1. VM tail + makespan (`WHAT=tail`, `WHAT=makespan`, 3 trials, strict hold ≤ 10 min).
+  2. Copy `out/*-vm.txt` back, summarize, fill sections 2 and 5.5, tick K1, K4, K5.
+  3. Push; `gh workflow run ci.yml --ref research/scheduler` (CI runs only on main, PRs,
+     and dispatch); green on all jobs ticks K6.
+- Blocked on: nothing; other agents' light holds on the VM (`si-m0`, `inverter-vm-5m`) delayed
+  the VM half to after 01:28.
 - Findings folded in: none.
-- Last verified: `research_bound` ran on the Mac 2026-10-18 00:40 (output committed); the
-  library's own tests not rerun (no library code changed).
+- Last verified: 2026-10-18 01:35, Mac: `research_bound`, the matrix, and TSan on every
+  candidate; the library's own tests not rerun (no library code changed; CI will).
