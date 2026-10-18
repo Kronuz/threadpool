@@ -37,7 +37,11 @@
     additive API sketch for threadpool (Detent keeps compiling), and what strata's executor
     and reactor's offload would change to use it. Written with the Mac numbers (sections 2
     to 6); the VM tables (2 and 5.5) pending.
-  - [ ] K6 The branch pushed, CI green on all jobs.
+  - [ ] K6 The branch pushed, CI green on all jobs: pushed at `3dd1261`; run 39111176813
+    (`workflow_dispatch`; CI runs only on main, PRs, and dispatch) green on all 8 jobs
+    (freebsd-x86_64, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-gcc,
+    linux-x86_64-clang, linux-tsan, macos-arm64, macos-x86_64) in 1m24s. To re-dispatch on
+    the final commit once the VM tables land.
 - Done:
   - The scaffolding (`03b0869`): `research/` with the queues (Chase-Lev with the PPoPP 2013
     orders, Vyukov's bounded MPMC), the futex layer (Linux futex, macOS
@@ -61,16 +65,19 @@
     registering the spinner as a sleeper (a wake syscall per post).
   - The note's sections 1 to 6 with the Mac numbers; `research/summarize.py` builds the
     median tables from the raw files.
-- Doing: the gate VM runs (`sched-vm-bound` light, then `sched-vm-tiny` and the tail /
-  makespan half under strict holds of at most 10 minutes), then their tables into sections 2
-  and 5.5.
+  - The bound on the gate VM (`fa9be5a`, `bound-vm.txt`): queue operations within 1.5× of
+    the Mac's; a clock read 31 µs and a futex wake 0.4 ms median, 2 ms p99, because HVF
+    exposes no stable TSC and the guest runs on `hpet` (note section 2).
+- Doing: the background driver `.scratch/drive.sh`: the Mac `tiny` rerun with the per-task
+  stamps off (they were 94 ns of the 46 to 140 ns per task; on the VM 62 µs), then the VM
+  halves (`sched-vm-a`: tiny, idle, memory; `sched-vm-b`: tail, makespan), each under its own
+  strict hold of 5 to 9 minutes, then the copy back to `docs/research/scheduler/*-vm.txt`.
 - Next:
-  1. VM tail + makespan (`WHAT=tail`, `WHAT=makespan`, 3 trials, strict hold ≤ 10 min).
-  2. Copy `out/*-vm.txt` back, summarize, fill sections 2 and 5.5, tick K1, K4, K5.
-  3. Push; `gh workflow run ci.yml --ref research/scheduler` (CI runs only on main, PRs,
-     and dispatch); green on all jobs ticks K6.
-- Blocked on: nothing; other agents' light holds on the VM (`si-m0`, `inverter-vm-5m`) delayed
-  the VM half to after 01:28.
+  1. Summarize the VM files, fill section 5.5 and refresh 5.1's Mac numbers; tick K1, K4, K5.
+  2. Commit, push, re-dispatch CI on the final commit; green ticks K6.
+- Blocked on: nothing. For the lead: the gate VM's `hpet` clocksource (31 µs per
+  `clock_gettime`, 0.4 ms wakes) taxes every per-task timestamp in strata's VM harnesses and
+  makes the VM unfit for latency floors; worth `clocksource=` work or bare metal for those rows.
 - Findings folded in: none.
 - Last verified: 2026-10-18 01:35, Mac: `research_bound`, the matrix, and TSan on every
   candidate; the library's own tests not rerun (no library code changed; CI will).
