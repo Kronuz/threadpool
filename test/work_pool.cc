@@ -1,7 +1,5 @@
-// Tests for WorkPool: every item runs once, posts from workers and producers, help_until
-// on a worker and off it, the draining destructor, idle CPU, and a ping-pong that hangs
-// on a lost wakeup.
-//
+// Tests for WorkPool: every item runs once, reposts from workers, help_until, the draining
+// destructor, idle CPU, and a ping-pong that hangs on a lost wakeup.
 // Build: c++ -std=c++20 -I.. work_pool.cc ../thread.cc -o work_pool && ./work_pool
 #include <atomic>
 #include <cassert>

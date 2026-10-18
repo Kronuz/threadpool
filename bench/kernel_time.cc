@@ -1,9 +1,7 @@
-// User time, kernel time, and context switches per operation for today's ThreadPool (bare
-// and with TaskGroup) against WorkPool (bare and with WorkGroup), interleaved trial by
-// trial: a handoff (post one item, the producer spins until it ran), a burst of tiny items
-// from one producer, an idle pool, and a 1 ms timed sleep that times out (a condvar
-// wait_until, today's pool_executor::sleep_until, against WorkPool::sleep_until). Built
-// with -DTHREADPOOL_BUILD_BENCH=ON; run as kernel_time [trials] [threads].
+// User, kernel time, and switches per op, today's pool (bare, TaskGroup) against WorkPool
+// (bare, WorkGroup), interleaved: a spun-on handoff, a burst of tiny items, an idle pool,
+// and a 1 ms timed sleep (condvar wait_until against WorkPool::sleep_until).
+// Built with -DTHREADPOOL_BUILD_BENCH=ON; run as kernel_time [trials] [threads].
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -57,9 +55,9 @@ void handoff(const char* pool, unsigned rounds, Post&& post) {
 		while (done.load(std::memory_order_acquire) == i) {
 			threadpool_detail::cpu_relax();
 		}
-		// A gap, so the worker parks again and the next round is a real wake.
-		auto until = std::chrono::steady_clock::now() + 200us;
-		while (std::chrono::steady_clock::now() < until) {
+		// A gap without clock reads (a VM's hpet makes them kernel time), so the worker parks
+		// again and the next round is a real wake.
+		for (int k = 0; k < 20'000; ++k) {
 			threadpool_detail::cpu_relax();
 		}
 	}
@@ -104,9 +102,10 @@ int main(int argc, char** argv) {
 	const unsigned sleeps = 2'000;
 	std::printf("kernel_time: trials=%u threads=%u handoff=%u burst=%u sleeps=%u\n", trials, threads, rounds, items, sleeps);
 
+	// Spins: a sleeping drain would add its own timed sleeps to the kernel time.
 	auto spin_drain = [](std::atomic<std::uint64_t>& done, unsigned n) {
 		while (done.load(std::memory_order_acquire) < n) {
-			std::this_thread::sleep_for(100us);
+			threadpool_detail::cpu_relax();
 		}
 	};
 

@@ -59,6 +59,81 @@ callers (the group's own running tasks may keep calling it while it waits).
 the group's own tasks, and `wait()` needs live pool workers. The pool must outlive
 the group, and `pool.clear()` would strand a group's queued tasks.
 
+## `WorkPool`, `WorkGroup`, `WorkItem` (`work_pool.hh`)
+
+One pool shared by many owners, each a `WorkGroup`. Items are caller-owned, so posting
+allocates nothing; groups take turns by deficit round robin; queries run first.
+
+```cpp
+#include "work_pool.hh"
+
+WorkPool pool;                          // one worker per hardware thread, reserve 1
+WorkGroup index(pool);                  // one per index
+
+struct Piece : WorkItem {
+	int shard;
+};
+Piece piece;
+piece.run = [](WorkItem* w) noexcept { search(static_cast<Piece*>(w)->shard); };
+piece.cls = WorkClass::query;
+index.post(piece);                      // no allocation
+
+index.enqueue([] { flush_partition(); });                  // boxed: one allocation
+index.enqueue([](const WorkItem& self) {
+	while (!self.stop_requested() && more()) { merge_a_slice(); }
+}, WorkClass::merge);
+index.wait();
+```
+
+### `WorkPool`
+
+- `WorkPool(Options = {})` — starts the workers. `Options`:
+  - `threads` (`0`: the hardware's concurrency).
+  - `reserve` (`1`): workers kept free of flush and merge work, so a query waits for a
+    wake, not for an item to end. Clamped to `threads - 1`.
+  - `merge_cap` (`0`: `threads - reserve`): workers merges may hold.
+  - `quantum` (`100us`): service per turn; a group's turn is `quantum * weight`.
+  - `name_format` (`"W{:02}"`): a `std::format` string over the worker index.
+- `~WorkPool()` — runs what is queued, then joins. Every `WorkGroup` must be gone.
+- `post(WorkItem&)` — queue an item on `item.group` (the pool's own group when null), in
+  `item.cls`, from any thread; never blocks, never allocates.
+- `help_until(pred)` — run the caller's own group's queued items (when called from one
+  of its items) and, on a worker, other groups' queries, until `pred()` holds; with
+  nothing to run it polls with backoff. It never runs another group's flush or merge.
+- `sleep_until(time_point, WorkGroup&) -> bool` — sleep until the deadline (`true`) or
+  until the group is cancelled (`false`), in one timed futex wait.
+- `threads()`, `on_worker()`.
+
+### `WorkGroup`
+
+- `WorkGroup(WorkPool&, unsigned width = 0, unsigned weight = 1)` — `width` caps how many
+  of the group's items of one class run at once (`0`: no cap); `weight` is quanta per
+  turn.
+- `post(WorkItem&)` — set `item.group` and post it.
+- `enqueue(func, WorkClass = flush) -> bool` — box `func()` or `func(const WorkItem&)` and
+  post it; `false` if the box cannot be allocated. Exceptions go to `L_EXC`.
+- `cancel() -> WorkItem*` — unlink the queued items and return them through `next`,
+  queries, then flushes, then merges, each oldest first; running items see
+  `stop_requested()`. Items posted afterwards run normally.
+- `wait()` — until nothing is queued and nothing runs but the caller (when called from
+  one of the group's items). On a worker it serves the group, and other groups'
+  queries, meanwhile; off the pool it parks.
+- `cancel_and_wait() -> size_t`, `stop_requested()` (for the item running on this
+  thread), `set_width()`, `set_weight()`, `pool()`.
+- `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are
+  left to their owner, who calls `cancel()` first to get them back), then wait. It may
+  run from one of the group's own items.
+
+### `WorkItem`
+
+Fields the caller sets: `run` (called once, `noexcept`; it may destroy or repost the
+item), `group`, `cls`. `next`, `epoch`, and `flags` are the pool's while the item is
+queued or running. `stop_requested()` tells a running item its group was cancelled
+after it started. An item must stay alive until `run` starts.
+
+`WorkClass`: `query` (latency first, may use the reserve), `flush`, `merge` (at most
+`merge_cap` workers).
+
 ## `Thread<ThreadImpl, ThreadPolicyType policy>`
 
 CRTP base (`thread.hh`). Derive `class Foo : public Thread<Foo, policy>` and

@@ -10,6 +10,7 @@ easy to fall into.
 ```
 threadpool.hh                 The pool: ThreadPool, ThreadPoolThread, PackagedTask, TaskWrapper, TaskQueue. Header.
 task_group.hh                 TaskGroup: owner-scoped cancel/wait over a pool, round-robin across groups. Header.
+work_pool.hh                  WorkPool/WorkGroup/WorkItem: the many-owner scheduler (lanes, ready rings, DRR, classes, futex idle). Header.
 thread.hh                     Thread<Impl,policy> CRTP base, ThreadPolicyType enum, thread-name free function decls. Header.
 thread.cc                     The only .cc: run_thread/setup_thread/set_thread_name/get_thread_name/sched_getcpu.
 blocking_concurrent_queue.h   Mutex + condvar queue the pool waits on. Header.
@@ -19,6 +20,9 @@ threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (sta
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
 test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
+test/work_pool.cc             WorkPool tests: delivery, reposts, help_until, draining, ping-pong, idle CPU.
+test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
+bench/                        kernel_time.cc (THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, quick start.
@@ -100,6 +104,14 @@ name is `threadpool`.
   `std::deque` under a `std::mutex`; `BlockingConcurrentQueue` adds a condvar.
   The class names match moodycamel's lock-free API but the implementation does
   not. Do not assume lock-free semantics anywhere.
+
+- **`WorkPool` is separate from `ThreadPool`.** It shares only `Thread` and the trace
+  hooks. Its invariants: every ring entry is one listed ticket of one lane; a lane with
+  queued work holds at least one ticket; extra tickets per class never exceed the worker
+  count (that bounds the ring); a group's state is freed only by whoever drops its last
+  ticket or helper; every post that pushes a ring entry does so with a seq_cst CAS before
+  `Idle::notify_one`, the half of the lost-wakeup pair the parker's final check relies on.
+  Workers never sleep on a timer or on `std::atomic::wait`.
 
 ## How to extend
 

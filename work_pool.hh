@@ -20,13 +20,10 @@
  * THE SOFTWARE.
  */
 
-// WorkPool: one shared pool for many owners. Each owner is a WorkGroup with its own FIFO;
-// groups wait their turn on a ready ring and are served by deficit round robin over
-// service time, so one group alone takes every worker and many busy groups share them
-// equally. Items are caller-owned (no allocation per post), and idle workers sleep on a
-// futex each. The idle protocol is Tokio's (tokio-rs/tokio, runtime/scheduler/
-// multi_thread/idle.rs, MIT); the ring is Dmitry Vyukov's bounded MPMC queue
-// (1024cores.net, BSD-2-Clause). See ARCHITECTURE.md, "WorkPool".
+// WorkPool: one pool for many owners (WorkGroups), served by deficit round robin, queries
+// first, with caller-owned items and futex-parked workers. See ARCHITECTURE.md, "WorkPool".
+// The idle protocol follows Tokio's runtime/scheduler/multi_thread/idle.rs (MIT); the ring
+// is Dmitry Vyukov's bounded MPMC queue (1024cores.net, BSD-2-Clause).
 #pragma once
 
 #include <atomic>                // for std::atomic
@@ -461,10 +458,9 @@ struct alignas(64) GroupState {
 };
 
 // The ready-list: Vyukov's bounded MPMC ring of group pointers, chained so it grows as
-// groups open without a post ever blocking: a larger ring becomes the tail, consumers
-// drain the old one first, and retired rings stay allocated until the pool ends (at most
-// as much again as the live one). Every entry is one listed ticket, so the ring needs
-// (live groups + extra tickets) entries; reserve() keeps it that large.
+// groups open and a post never blocks: a larger ring becomes the tail, the old one drains
+// first, and retired rings live until the pool ends. Each entry is one listed ticket, so
+// reserve() keeps room for (live groups + extra tickets).
 class ReadyRing {
 	static constexpr std::size_t closed = std::size_t(1) << (sizeof(std::size_t) * 8 - 1);
 
@@ -769,7 +765,14 @@ private:
 		return false;
 	}
 
+	// After unlocking s: what its critical section decided. The common case is inline.
 	void release(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
+		if (push | extra | wake | free) {
+			release_slow(s, c, push, extra, wake, free);
+		}
+	}
+
+	[[gnu::noinline]] void release_slow(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
 		if (push) {
 			_ready[c].push(s);
 		}
@@ -788,8 +791,8 @@ private:
 		}
 	}
 
-	static void run_item(GroupState& s, WorkItem* item) noexcept {
-		auto& here = threadpool_detail::tls_here;
+	// `here` is this thread's tls_here, resolved once by the caller (per turn, not per item).
+	static void run_item(threadpool_detail::Here& here, GroupState& s, WorkItem* item) noexcept {
 		auto* prev_state = here.state;
 		auto* prev_item = here.item;
 		here.state = &s;
@@ -807,6 +810,7 @@ private:
 		std::int64_t budget = l.deficit + _quantum * s.weight;
 		l.deficit = 0;
 		bool wake = false;
+		auto& here = threadpool_detail::tls_here;
 		auto t = threadpool_detail::ticks();
 		while (budget > 0) {
 			WorkItem* item = l.pop();
@@ -817,7 +821,7 @@ private:
 			// relaxed: stop_requested() is advisory, read relaxed like TaskGroupStopToken.
 			item->epoch = s.epoch.load(std::memory_order_relaxed);
 			s.mu.unlock();
-			run_item(s, item);
+			run_item(here, s, item);
 			auto now = threadpool_detail::ticks();
 			budget -= static_cast<std::int64_t>(now - t);
 			t = now;
@@ -871,44 +875,71 @@ private:
 		turn(s, c, false);
 	}
 
-	// The next ring entry in class order. A flush or merge turn holds a background slot
-	// (released by done()): at most _bg_cap workers run them, so the reserve stays free
-	// for queries, and at most _merge_cap run merges.
-	GroupState* pick(unsigned& c) noexcept {
+	// The background slots a worker holds, kept across consecutive flush and merge turns
+	// so a stream of them costs no RMW on the shared counts.
+	struct Slots {
+		bool bg = false;
+		bool merge = false;
+	};
+
+	void release_merge(Slots& held) noexcept {
+		if (held.merge) {
+			held.merge = false;
+			_busy_merge.fetch_sub(1, std::memory_order_relaxed);
+		}
+	}
+
+	void release_slots(Slots& held) noexcept {
+		release_merge(held);
+		if (held.bg) {
+			held.bg = false;
+			_busy_bg.fetch_sub(1, std::memory_order_relaxed);
+		}
+	}
+
+	// The next ring entry in class order. Flush and merge turns need a background slot (at
+	// most _bg_cap held, so the reserve stays free for queries) and merges a merge slot (at
+	// most _merge_cap). Slots are taken by RMW before the pop, so the caps are exact; a
+	// query or an empty pick gives them back.
+	GroupState* pick(unsigned& c, Slots& held) noexcept {
 		if (GroupState* s = _ready[query].pop()) {
+			release_slots(held);
 			c = query;
 			return s;
 		}
-		if (_ready[flush].size() == 0 && _ready[merge].size() == 0) {
-			return nullptr;
-		}
-		// relaxed: counters for the caps; the turn is ordered by the ring and the group lock.
-		if (_busy_bg.fetch_add(1, std::memory_order_relaxed) < _bg_cap) {
-			if (GroupState* s = _ready[flush].pop()) {
-				c = flush;
-				return s;
+		if (!held.bg) {
+			if (_ready[flush].size() == 0 && _ready[merge].size() == 0) {
+				return nullptr;
 			}
-			if (_ready[merge].size() != 0) {
+			// relaxed: a count for the cap; the turn is ordered by the ring and the group lock.
+			if (_busy_bg.fetch_add(1, std::memory_order_relaxed) >= _bg_cap) {
+				_busy_bg.fetch_sub(1, std::memory_order_relaxed);
+				return nullptr;
+			}
+			held.bg = true;
+		}
+		if (GroupState* s = _ready[flush].pop()) {
+			release_merge(held);
+			c = flush;
+			return s;
+		}
+		if (_ready[merge].size() != 0) {
+			if (!held.merge) {
 				if (_busy_merge.fetch_add(1, std::memory_order_relaxed) < _merge_cap) {
-					if (GroupState* s = _ready[merge].pop()) {
-						c = merge;
-						return s;
-					}
+					held.merge = true;
+				} else {
+					_busy_merge.fetch_sub(1, std::memory_order_relaxed);
 				}
-				_busy_merge.fetch_sub(1, std::memory_order_relaxed);
+			}
+			if (held.merge) {
+				if (GroupState* s = _ready[merge].pop()) {
+					c = merge;
+					return s;
+				}
 			}
 		}
-		_busy_bg.fetch_sub(1, std::memory_order_relaxed);
+		release_slots(held);
 		return nullptr;
-	}
-
-	void done(unsigned c) noexcept {
-		if (c != query) {
-			_busy_bg.fetch_sub(1, std::memory_order_relaxed);
-			if (c == merge) {
-				_busy_merge.fetch_sub(1, std::memory_order_relaxed);
-			}
-		}
 	}
 
 	// The parker's final check: work this worker could take now. A slot held by another
@@ -929,7 +960,8 @@ private:
 	// Runs one queued item of the caller's own group inline, queries first; false when
 	// there is none.
 	bool help_own() noexcept {
-		GroupState* s = threadpool_detail::tls_here.state;
+		auto& here = threadpool_detail::tls_here;
+		GroupState* s = here.state;
 		if (!s) {
 			return false;
 		}
@@ -947,7 +979,7 @@ private:
 		++s->running;
 		item->epoch = s->epoch.load(std::memory_order_relaxed);
 		s->mu.unlock();
-		run_item(*s, item);
+		run_item(here, *s, item);
 		s->mu.lock();
 		--s->running;
 		bool wake = waiters_due(*s);
@@ -999,13 +1031,14 @@ private:
 	void work(unsigned idx) noexcept {
 		threadpool_detail::tls_here.pool = this;
 		bool searching = false;
+		Slots held;
 		for (;;) {
 			unsigned c = flush;
-			GroupState* s = pick(c);
+			GroupState* s = pick(c, held);
 			if (!s && !searching) {
 				searching = _idle.to_searching();
 				if (searching) {
-					s = pick(c);
+					s = pick(c, held);
 				}
 			}
 			if (s) {
@@ -1016,7 +1049,6 @@ private:
 					}
 				}
 				serve(*s, c);
-				done(c);
 				continue;
 			}
 			if (!park(idx, searching)) {

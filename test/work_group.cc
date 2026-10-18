@@ -1,8 +1,5 @@
-// Tests for WorkGroup on a WorkPool: one group alone fans out to every worker, groups take
-// turns, width caps, weight shares, cancel hands back the queue, wait helps instead of
-// blocking, the destructor (also from the group's own item), sleep_until, thousands of
-// groups opening while others post, and the classes: the reserve, their order, merge_cap.
-//
+// Tests for WorkGroup: fan-out, turns, width, weight, cancel, helping waits, the destructor
+// (also from its own item), sleep_until, groups opening under load, and the classes.
 // Build: c++ -std=c++20 -I.. work_group.cc ../thread.cc -o work_group && ./work_group
 #include <atomic>
 #include <cassert>
@@ -433,6 +430,42 @@ int main() {
 		blocker.wait();
 		assert((got == std::vector<char>{'q', 'f', 'm'}));
 		std::printf("work_group OK: cancel() handed back queries, flushes, then merges\n");
+	}
+
+	// ---- 16. Churn (the note's correction 8), under a watchdog: pools and groups made and
+	// destroyed right after their last item reports, so a stop that loses its wakeup hangs
+	// and a group freed under a worker's ticket trips ASan. ----
+	{
+		std::atomic<bool> finished{false};
+		std::thread watchdog([&] {
+			for (int i = 0; i < 1200 && !finished.load(); ++i) {
+				std::this_thread::sleep_for(100ms);
+			}
+			if (!finished.load()) {
+				std::fprintf(stderr, "TIMEOUT: work_group churn hung\n");
+				std::abort();
+			}
+		});
+		for (int cycle = 0; cycle < 200; ++cycle) {
+			WorkPool pool({.threads = 1 + unsigned(cycle % 4), .reserve = unsigned(cycle % 2)});
+			for (int round = 0; round < 4; ++round) {
+				std::atomic<int> ran{0};
+				auto* group = new WorkGroup(pool);
+				for (int i = 0; i < 32; ++i) {
+					group->enqueue([&ran] { ran.fetch_add(1, std::memory_order_release); },
+						i % 3 == 0 ? WorkClass::query : WorkClass::flush);
+				}
+				// Destroyed as soon as the last item reports, while workers may still hold
+				// its tickets (fan-out put several on the rings).
+				while (ran.load(std::memory_order_acquire) < 32) {
+					threadpool_detail::cpu_relax();
+				}
+				delete group;
+			}
+		}
+		finished = true;
+		watchdog.join();
+		std::printf("work_group OK: 200 pools and 800 groups churned without a hang or a use after free\n");
 	}
 
 	std::printf("all work_group tests passed\n");

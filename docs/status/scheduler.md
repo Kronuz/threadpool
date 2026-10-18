@@ -78,7 +78,14 @@
      only the caller's own group's items. Without this a one-worker pool deadlocks on a
      wait across groups (`test/work_group.cc` case 7).
   4. A group's state outlives its `WorkGroup` until its last ticket leaves the ring, so
-     `wait()` and the destructor never wait a ring round for a stale ticket.
+     `wait()` and the destructor never wait a ring round for a stale ticket. This is how
+     the branch closes correction 8's second race (a group freed while a worker holds its
+     ticket): whoever drops the last ticket or helper frees the state, after its final
+     unlock. The note's fix instead makes the destructor wait for the tickets; both keep
+     the worker off freed memory. Correction 8's first race (a sleeper registering after
+     the stop's unpark) is closed since R1: `park()` loads the stop flag again after
+     `to_parked()` registers under the idle mutex. `test/work_group.cc` case 16 churns 200
+     pools and 800 groups under a watchdog, each group destroyed as its last item reports.
   5. The destructor cancels: queued boxed items (`enqueue`) are freed unrun; caller-owned
      items are unlinked and left to the owner, who calls `cancel()` first to get them back.
   6. The default `reserve = 1` (correction 7) keeps one worker off flush and merge work,
@@ -87,7 +94,13 @@
      while queries arrive? (A question for the lead and the owner, not decided here.)
   7. `width` caps each class separately: a group's query, flush, and merge lanes each hold
      up to `width` workers.
-- Findings folded in: none.
+- Findings folded in: the note's corrections 1 to 8 (final at `394aaea` on main).
+- For the lead: strata's FreeBSD VM runs on `kern.timecounter.hardware: HPET` too
+  (`choice: TSC-low(-100) ... HPET(950)`), so its clock reads may be slow like the gate VM's;
+  `bench/kernel_time.cc` keeps clock reads and timed sleeps out of its own loops.
+- VM rule (the lead's): a run using more than two vCPUs on the gate VM or the FreeBSD VM
+  takes a strict hold, a `-j4` build included; light holds are for one- or two-thread runs.
+  K6 builds on the FreeBSD VM at `-j2` under a light hold and measures under a strict one.
 - Host rule slip (for the lead): at about 07:21 to 07:25 I built and ran the TSan and ASan
   suites while `si-m2c` (strict, the small-indexes M2 rerun, 07:19 to 07:34) held the host;
   my command printed `quiet check`'s 1 without gating on it. That run may need a redo.
