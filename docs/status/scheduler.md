@@ -5,7 +5,7 @@
   and the corrections at its top (read at `150152c`). Reviews: none yet.
 - Branch / worktree: `feature/scheduler` at `~/code/Kronuz/threadpool-wt/scheduler`, from
   `origin/main` at `628679a`.
-- State: implementing (R1, R2, R3 in; K3 A/B, then K4, K6, K7)
+- State: paused (quota), at the commit after `7549809`; rebased onto main `394aaea`.
 - Done criteria (set by the lead; contributors tick, never edit):
   - [ ] K1. R1 is in. Idle workers use no measurable CPU. Tiny-task throughput is at least
     today's pool and at least the research prototype's, within noise (interleaved A/B, five
@@ -55,13 +55,23 @@
     in that order; `Options::reserve` (default 1) and `merge_cap` (default threads -
     reserve) held as exact slots; waiting workers also serve other groups' queries;
     `enqueue(f, cls)`; tests 12 to 15; `bench/kernel_time.cc` (K6, off by default).
-- Doing: K3's tail A/B against the prototypes.
-- Next:
-  1. K3 against the note's 5.2 tables; K1's final tiny matrix and K2 again with the default
-     reserve.
-  2. K4: build scheduler, logger, http-log, prism, strata, and Xapiand against the branch.
-  3. K6 on strata's FreeBSD VM (`~/code/Kronuz/strata/tools/vm/freebsd.sh`).
-  4. K7: README, docs/API.md, ARCHITECTURE.md, AGENTS.md.
+- Doing: nothing (paused).
+- Next, exactly what is left:
+  1. Local TSan and ASan+UBSan on `7549809` (the plain suite passed, churn included; a
+     strict hold stopped the sanitizer runs), then dispatch CI on the rebased branch.
+  2. Rebuild the harness (`bench/research_ab.sh .scratch/ab`) and rerun under strict holds:
+     `.scratch/ab/final.sh tiny`, `makespan`, `tail` (scripts in the worktree's .scratch;
+     copy them into bench/ if the lead wants them tracked). `pick()` changed since the K1
+     to K3 evidence above, so those rows need these reruns. K1 still trails the `groups`
+     prototype on chains (12.8 against 10.2 ns at `0b7dd12`) and on 4 producers (97
+     against 68 to 73): profile the chain case (`.scratch/ab/prof2.sh`) after the rerun.
+  3. K4: `.scratch/consumers.sh` (scheduler, logger, http-log, prism, strata; `-j4`,
+     `nice`, gated on holds), then Xapiand. Existing files are byte-identical to main.
+  4. K6: sync to the FreeBSD VM (done once, `~/libs/tp-workpool`; resync), build at `-j2`
+     under a light hold with `-DTHREADPOOL_BUILD_BENCH=ON`, run `build/kernel_time 5 4` under
+     a strict hold, under `timeout`; compare sys and user per op against today's pool.
+  5. K7: README, API, ARCHITECTURE, AGENTS written; review once the code settles.
+  6. Tick K1 to K7 with the final evidence; State to "in review".
 - Blocked on: nothing.
 - Decisions to confirm (architect), each a reading of the note:
   1. Extra tickets are capped pool-wide at one per worker and retired at a turn's end when
