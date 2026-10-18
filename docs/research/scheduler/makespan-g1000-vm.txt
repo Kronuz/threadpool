@@ -1,0 +1,11 @@
+workloads: makespan threads=8 trials=2 pools=baseline,steal,groups,prio,home,
+makespan pool=baseline       groups=1000   flush=64x1ms alone=16.34 ms (ideal 8000.0 us) beside=1523.91 ms (nominal fair-share 8008.00 ms, x0.19) share=7.39 bg_tasks_per_s_during=5647 fairness=0.971
+makespan pool=steal          groups=1000   flush=64x1ms alone=12.81 ms (ideal 8000.0 us) beside=16.11 ms (nominal fair-share 8008.00 ms, x0.00) share=653.71 bg_tasks_per_s_during=2108 fairness=0.755
+makespan pool=groups         groups=1000   flush=64x1ms alone=13.34 ms (ideal 8000.0 us) beside=12452.21 ms (nominal fair-share 8008.00 ms, x1.55) share=0.89 bg_tasks_per_s_during=5754 fairness=0.999
+makespan pool=prio-r1-m7     groups=1000   flush=64x1ms alone=15.56 ms (ideal 8000.0 us) beside=14375.96 ms (nominal fair-share 8008.00 ms, x1.80) share=0.92 bg_tasks_per_s_during=4855 fairness=0.999
+makespan pool=home           groups=1000   flush=64x1ms alone=12.77 ms (ideal 8000.0 us) beside=231.65 ms (nominal fair-share 8008.00 ms, x0.03) share=42.77 bg_tasks_per_s_during=6190 fairness=0.988
+makespan pool=baseline       groups=1000   flush=64x1ms alone=14.04 ms (ideal 8000.0 us) beside=1567.88 ms (nominal fair-share 8008.00 ms, x0.20) share=7.31 bg_tasks_per_s_during=5546 fairness=0.966
+makespan pool=steal          groups=1000   flush=64x1ms alone=12.71 ms (ideal 8000.0 us) beside=10.03 ms (nominal fair-share 8008.00 ms, x0.00) share=889.78 bg_tasks_per_s_during=796 fairness=0.753
+makespan pool=groups         groups=1000   flush=64x1ms alone=13.31 ms (ideal 8000.0 us) beside=12172.40 ms (nominal fair-share 8008.00 ms, x1.52) share=0.86 bg_tasks_per_s_during=6148 fairness=0.999
+makespan pool=prio-r1-m7     groups=1000   flush=64x1ms alone=16.38 ms (ideal 8000.0 us) beside=14372.55 ms (nominal fair-share 8008.00 ms, x1.79) share=0.94 bg_tasks_per_s_during=4737 fairness=0.999
+makespan pool=home           groups=1000   flush=64x1ms alone=12.83 ms (ideal 8000.0 us) beside=250.22 ms (nominal fair-share 8008.00 ms, x0.03) share=42.62 bg_tasks_per_s_during=5750 fairness=0.987

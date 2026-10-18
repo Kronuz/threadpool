@@ -451,6 +451,7 @@ protected:
 	ReadyList _ready[PRIO_COUNT];
 	Options _opt;
 	std::string _name;
+	std::int64_t _quantum;  // in cycle-counter ticks: a clock read is 31 µs on the gate VM
 
 	unsigned cap(const G& g) const noexcept { return g.width ? g.width : _n; }
 
@@ -466,9 +467,9 @@ protected:
 	void serve(G* g, unsigned c) {
 		Fifo& f = g->q[c];
 		g->mu.lock();
-		f.deficit += static_cast<std::int64_t>(_opt.quantum_ns) * g->weight;
-		if (f.deficit > static_cast<std::int64_t>(_opt.quantum_ns) * g->weight) {
-			f.deficit = static_cast<std::int64_t>(_opt.quantum_ns) * g->weight;
+		f.deficit += _quantum * g->weight;
+		if (f.deficit > _quantum * g->weight) {
+			f.deficit = _quantum * g->weight;
 		}
 		while (f.deficit > 0) {
 			Task* t = f.pop();
@@ -479,9 +480,9 @@ protected:
 				return;
 			}
 			g->mu.unlock();
-			auto t0 = now_ns();
+			auto t0 = cycles();
 			t->fn(t);
-			auto dt = static_cast<std::int64_t>(now_ns() - t0);
+			auto dt = static_cast<std::int64_t>(cycles() - t0);
 			g->mu.lock();
 			f.deficit -= dt;
 		}
@@ -511,6 +512,7 @@ protected:
 public:
 	explicit GroupPool(unsigned n) : GroupPool(n, Options{}, "groups") {}
 	GroupPool(unsigned n, Options opt, const char* nm = "groups") : ThreadedPool(n, opt.spin_us), _opt(opt), _name(nm) {
+		_quantum = static_cast<std::int64_t>(double(opt.quantum_ns) * cycles_per_ns());
 		if (opt.quantum_ns != 100'000) { _name += "-q" + std::to_string(opt.quantum_ns / 1000) + "us"; }
 		if (opt.spin_us) { _name += "-spin"; }
 	}

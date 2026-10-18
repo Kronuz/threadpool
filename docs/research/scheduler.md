@@ -338,43 +338,44 @@ parking.
 
 ### 5.1 Tiny tasks (K4: throughput)
 
-One external producer posting 500,000 empty tasks round robin over the groups (the rerun
-without per-task timestamps, `sched-mac-tiny2`):
+One external producer posting 500,000 empty tasks round robin over the groups (the final run,
+`sched-mac-tiny3`, with the committed code: no per-task timestamps, cycle-counter quanta):
 
 | pool | 1 group: ns/task wall, CPU | 1,000 groups | 10,000 groups |
 |---|---|---|---|
-| baseline | 2,136 / 22,664 | 7,655 / 20,792 | 7,544 / 20,617 |
-| raw | 6,894 / 19,254 | 7,008 / 19,585 | 7,092 / 19,847 |
-| steal (D-A) | 153 / 2,171 | 159 / 2,118 | 174 / 2,626 |
-| groups (D-B) | 633 / 7,482 | 138 / 1,711 | 158 / 1,798 |
-| prio-r1 (D-C) | 540 / 6,253 | 157 / 1,950 | 171 / 2,052 |
-| home (D-D) | 94 / 710 | 506 / 1,387 | 619 / 1,773 |
-| taskflow | 217 / 2,775 | 218 / 2,845 | 220 / 2,871 |
-| moodycamel | 1,584 / 10,046 | 1,359 / 9,099 | 1,566 / 10,026 |
+| baseline | 2,137 / 22,870 | 10,575 / 29,450 | 10,210 / 28,970 |
+| raw | 10,118 / 29,324 | 10,110 / 28,632 | 8,112 / 23,280 |
+| steal (D-A) | 161 / 1,563 | 162 / 1,656 | 162 / 1,892 |
+| groups (D-B) | 686 / 6,658 | 155 / 1,598 | 169 / 1,732 |
+| prio-r1 (D-C) | 490 / 4,562 | 166 / 1,759 | 173 / 1,855 |
+| home (D-D) | 118 / 846 | 512 / 1,624 | 694 / 2,071 |
+| taskflow | 246 / 2,074 | 232 / 2,310 | 235 / 2,774 |
+| moodycamel | 758 / 5,556 | 688 / 4,888 | 1,472 / 8,654 |
 
 Four producers, 1,000 groups, empty tasks and 1 µs tasks (wall ns/task; the 1 µs column's
 floor is 1,000/16 = 62 ns):
 
 | pool | 4 producers, empty | 4 producers, 1 µs | chained (worker-local re-post) ns/task, CPU |
 |---|---|---|---|
-| baseline | 9,410 | 8,855 | |
-| raw | 7,262 | 1,766 | |
-| steal | 166 | 122 | 3.4 / 49 |
-| steal-lifo | | | 3.7 / 49 |
-| groups | 116 | 99 | 10.5 / 162 |
-| prio-r1 | 126 | 104 | 11.6 / 165 |
-| home | 744 | 92 | 10.7 / 151 |
-| taskflow | 139 | 189 | 76 / 1,062 |
-| moodycamel | 163 | 143 | 144 / 1,753 |
+| baseline | 8,382 | 6,140 | |
+| raw | 4,890 | 1,983 | |
+| steal | 178 | 135 | 4.6 / 50 |
+| steal-lifo | | | 4.3 / 47 |
+| groups | 56 | 94 | 7.5 / 86 |
+| prio-r1 | 128 | 93 | 7.7 / 86 |
+| home | 783 | 112 | 13.3 / 130 |
+| taskflow | 167 | 234 | 87 / 1,025 |
+| moodycamel | 188 | 165 | 198 / 1,692 |
 
-Reading: today's pool costs 7 to 9 µs of wall and 20 to 23 µs of CPU per external tiny task
-(70 µs of CPU with four producers contending on its mutex), all of it the condvar wake per
-enqueue (the queue itself is 41 ns); every candidate is 40 to 70× cheaper in wall and 8 to 30×
-in CPU, and all beat both references. With many groups `groups`, `prio`, and `steal` are
-within 138 to 174 ns of each other; at one group every worker hits that group's one spinlock
-and `groups` falls to 633 ns, where `steal` (153) and `home` (94) are 4 to 7× faster.
-Worker-local continuations through the LIFO slot cost 3.4 ns. At 1 µs tasks every candidate is
-within 92 to 122 ns of each other, and the pool's cost no longer matters.
+Reading: today's pool costs 2 to 11 µs of wall and 23 to 29 µs of CPU per external tiny task
+(47 µs of CPU with four producers contending on its mutex), all of it the condvar wake per
+enqueue (the queue itself is 41 ns); every candidate is 15 to 70× cheaper in wall and 10 to
+20× in CPU, and all beat both references. With many groups `groups`, `prio`, and `steal` are
+within 155 to 173 ns of each other; at one group every worker hits that group's one spinlock
+and `groups` falls to 686 ns, where `steal` (161) and `home` (118) are 4 to 6× faster, and
+with four producers `groups` leads at 56 ns. Worker-local continuations through the LIFO
+slot cost 4.6 ns (7.5 through a group's FIFO). At 1 µs tasks every candidate is within 93 to
+135 ns of each other, and the pool's cost no longer matters.
 
 ### 5.2 The latency tail of a query piece on a saturated pool (K4)
 
@@ -473,7 +474,70 @@ design: 10,000 groups are 1.3 to 2.8 MB, not a factor.
 
 ### 5.5 The gate VM
 
-(`*-vm.txt`; 8 vCPUs, Linux 6.8, g++ 13; filled from the VM runs.)
+`*-vm.txt`: 8 vCPUs of the same host, Linux 6.8, g++ 13, the `hpet` clocksource and 0.4 ms
+wakes of section 2, other agents' jobs live; `tail` and `makespan` are two trials each under
+a strict hold of four minutes, `tiny` three trials under a light hold. The pools stand in the
+same order as on the Mac; the absolute latencies are the hypervisor's.
+
+The latency tail (a 20 µs query every 1 ms, 2 s per trial, 8 workers, four merges):
+
+| pool | 1 hot group: wait p50 / p99 / p99.9 | 1,000 busy: p50 / p99 / p99.9 | 10,000 (100 busy): p50 / p99 / p99.9 | bg (1,000 busy) | fairness |
+|---|---|---|---|---|---|
+| baseline | 1.56 / 6.15 / 9.41 ms | **220 / 258 / 258 ms** | 17.6 / 39.3 / 39.9 ms | 6.6k | 0.95 |
+| steal | 56 µs / 1.31 / 10.4 ms | 30 µs / 1.37 / 1.54 ms | 32 µs / 1.32 / 1.57 ms | 7.5k | 0.99 |
+| groups | 44 µs / 1.33 / 1.55 ms | 34 µs / 1.44 / 1.73 ms | 40 µs / 1.31 / 1.62 ms | 7.1k | 1.00 |
+| prio-r1 | 26 µs / 800 µs / 1.52 ms | 26 µs / 867 µs / 1.50 ms | 30 µs / 871 µs / 1.22 ms | 6.0k | 1.00 |
+| prio-r2 | 146 µs / 1.26 / 1.88 ms | 172 µs / 1.27 / 1.71 ms | 166 µs / 1.39 / 2.10 ms | 5.3k | 0.99 |
+| home | 10.2 / 31.3 / 32.8 ms | 161 / 168 / 168 ms | 24.6 / 27.8 / 27.8 ms | 7.8k | 0.95 |
+
+One index's 64 × 1 ms flush (ideal alone on 8 workers: 8 ms):
+
+| pool | alone | beside 1,000 | share | beside 100 | share |
+|---|---|---|---|---|---|
+| baseline | 15.2 ms | 1.55 s | 7.35× | 181 ms | 6.27× |
+| steal | 12.8 ms | 13.1 ms | 772× | 11.1 ms | 86× |
+| groups | 13.3 ms | 12.3 s | 0.88× | 1.24 s | 0.93× |
+| groups-q1000us | | | | 1.29 s | 0.90× |
+| prio-r1 | 16.0 ms | 14.4 s | 0.93× | 1.40 s | 0.97× |
+| home | 12.8 ms | 241 ms | 42.7× | 100 ms | 10.8× |
+
+Idle CPU and memory per group:
+
+| pool | idle CPU (of one core) | context switches / s | RSS bytes per group (10,000) |
+|---|---|---|---|
+| baseline / raw | **4.77% / 3.84%** | 88.8 / 88.3 | 902 |
+| steal, groups, prio, home, taskflow, moodycamel | 0.004 to 0.011% | 0.3 | 0 / 136 / 136 / 1 |
+
+Reading: the ordering is the Mac's. Today's pool puts a query behind a round of 1,000 tickets
+(220 ms p50 at 8 workers) and the candidates at 26 to 56 µs; the reserved worker (`prio-r1`)
+has the best p99 on every configuration (800 to 871 µs against 1.3 ms), and `prio-r2` loses
+at 8 workers (two of eight reserved, and a reserved worker here needs a hypervisor wake, 0.4
+ms). Fairness and shares repeat: `groups` and `prio` 0.88 to 0.97 of an equal share, today's
+tickets 6 to 7×, home 11 to 43×, deques 86 to 772×. The idle row is the VM's sharpest
+verdict on the 100 ms timed waits: 4.8% of a core for today's pool against 0.004 to 0.011%
+for every futex-parked candidate, since each timer wake costs a hypervisor exit here.
+
+Tiny tasks (100,000 per run; the first version of this run measured the group pools with two
+`steady_clock` reads per task in their deficit accounting, 62 µs on hpet, which put `groups`
+and `prio` at 8 to 23 µs per task; correction 5 in section 6 came from it, the accounting now
+uses the cycle counter, and this is the rerun):
+
+| pool | 1 group: ns/task wall, CPU | 1,000 groups | 10,000 groups | 4 producers | 1 µs tasks | chained |
+|---|---|---|---|---|---|---|
+| baseline | 85,631 / 126,608 | 111,846 / 173,725 | 123,156 / 184,094 | 106,512 | 110,883 | |
+| raw | 64,668 / 85,745 | 96,653 / 138,282 | 94,652 / 134,942 | 91,110 | 93,031 | |
+| steal | 131 / 725 | 158 / 967 | 152 / 925 | 152 | 240 | 10 / 68 |
+| groups | 427 / 2,885 | 98 / 449 | 162 / 657 | 84 | 241 | 16 / 107 |
+| prio-r1 | 407 / 2,522 | 87 / 323 | 222 / 1,086 | 86 | 316 | 17 / 113 |
+| home | 114 / 407 | 765 / 1,237 | 832 / 1,235 | 415 | 270 | 22 / 159 |
+| taskflow | 6,212 / 15,341 | 9,133 / 22,292 | 8,176 / 19,040 | 492 | 862 | 150 / 1,185 |
+| moodycamel | 536 / 1,728 | 587 / 1,682 | 442 / 1,558 | 219 | 338 | 170 / 1,320 |
+
+On the VM today's pool costs 65 to 123 µs per external tiny task (each enqueue's wake is a
+hypervisor wake), the candidates 84 to 240 ns with the same shape as on the Mac (`groups`
+and `prio` lead with many groups, `home` and `steal` with one), and the references fall
+behind by more than on the Mac: Taskflow's notifier wakes a worker through the hypervisor
+per burst (6 to 9 µs per task), moodycamel's semaphore 0.4 to 0.6 µs.
 
 ### 5.6 The FreeBSD finding: what a wake and a timed sleep cost per call
 

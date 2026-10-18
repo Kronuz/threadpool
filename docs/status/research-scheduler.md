@@ -4,12 +4,15 @@
   engineer or designer to build from. Reviews: none yet.
 - Branch / worktree: `research/scheduler` at `~/code/Kronuz/threadpool-wt/research`, from
   `origin/main` at `628679a`.
-- State: implementing (the Mac half measured and written; the gate VM runs in progress)
+- State: in review (the note is delivered; K1 to K5 met, K6 on the final commit's CI run)
 - Done criteria (set by the lead; contributors tick, never edit):
-  - [ ] K1 The bound: per-task overhead and wake-latency floors on this hardware (enqueue
+  - [x] K1 The bound: per-task overhead and wake-latency floors on this hardware (enqueue
     and dequeue in ns, an idle worker's wake in µs, futex or ulock against a condition
-    variable), on the Mac (x86_64) and the strata gate VM. Mac done
-    (`docs/research/scheduler/bound-mac.txt`, note section 2); VM running.
+    variable), on the Mac (x86_64) and the strata gate VM: note section 2 from
+    `bound-mac.txt` and `bound-vm.txt` (Mac: queue ops 12 to 85 ns, a wake 10 µs p50 and
+    63 to 77 µs p99 for condvar, atomic wait, and raw futex alike; VM: 31 µs clock reads and
+    0.4 ms wakes on hpet, so the VM is not a latency floor), plus the FreeBSD VM's wake and
+    timed-sleep costs in 5.6 (`handoff-*.txt`).
   - [x] K2 A survey, reading source freely: work-stealing deques (Chase-Lev and its C11
     memory ordering), Tokio's scheduler (LIFO slot, inject queue, budget), Go's runtime
     (P/M/G, netpoll), oneTBB arenas, Taskflow, folly's CPUThreadPoolExecutor and LifoSem,
@@ -27,16 +30,21 @@
     that owns the index's arena): `research/pools.hh` (`steal`, `groups`, `prio`, `home`,
     plus today's `baseline` and `raw`, Taskflow 3.10, and moodycamel 1.0.4), note sections
     4 and 5; TSan (Homebrew LLVM 23) clean on every candidate over every workload.
-  - [ ] K4 The workloads measured with one hot group, 1,000 busy groups, and 10,000 groups
+  - [x] K4 The workloads measured with one hot group, 1,000 busy groups, and 10,000 groups
     mostly idle: tiny-task throughput; p50, p99, p99.9 of a query-class task while flushes
     and merges saturate the pool; one index's flush makespan alone against beside 1,000
-    others; CPU when idle (about zero); memory per group. Mac done (note section 5,
-    `*-mac.txt`, medians of three interleaved trials under strict holds); VM running.
-  - [ ] K5 `docs/research/scheduler.md`: the bound, the survey with sources, each idea with
+    others; CPU when idle (about zero); memory per group: note sections 5.1 to 5.5 from
+    `*-mac.txt` (medians of three interleaved trials under strict holds) and `*-vm.txt`
+    (three trials for tiny, two for tail and makespan, light and strict holds with remote
+    timeouts). Query p50 at 1,000 busy groups: today 70 ms (Mac) and 220 ms (VM) against
+    65 to 71 µs (Mac) and 26 to 34 µs (VM) for the group and deque pools; idle CPU today
+    0.35 to 0.47% (Mac) and 4.8% (VM) of a core against 0.001 to 0.011%; a bursting index's
+    share beside 1,000: today 7 to 16×, groups and prio 0.8 to 0.9×, deques 700×.
+  - [x] K5 `docs/research/scheduler.md`: the bound, the survey with sources, each idea with
     its prototype result, and the top 3 recommendations, each with prototype numbers, an
     additive API sketch for threadpool (Detent keeps compiling), and what strata's executor
-    and reactor's offload would change to use it. Written with the Mac numbers (sections 2
-    to 6); the VM tables (2 and 5.5) pending.
+    and reactor's offload would change to use it: sections 1 to 7, with the corrections to
+    the sketch at the top of section 6 (eight, from the FreeBSD probe and the gate-VM hang).
   - [ ] K6 The branch pushed, CI green on all jobs: pushed at `3dd1261`; run 39111176813
     (`workflow_dispatch`; CI runs only on main, PRs, and dispatch) green on all 8 jobs
     (freebsd-x86_64, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-gcc,
@@ -88,12 +96,19 @@
   for 5h36m (the hang above, 100% of one core) beside other agents' gate-VM numbers from
   01:28 to 07:04, when the coordinator killed it. Every VM command now runs under `timeout`
   bounded by its hold, and every VM run holds at least light.
-- Doing: the gate VM halves with the fixed harness (`sched-vm-a` light: tiny at 100k tasks,
-  idle, memory, three trials; `sched-vm-b` strict ≤ 4 min: tail at 2 s and makespan, two
-  trials), in the foreground with remote timeouts.
-- Next:
-  1. Copy the VM files back, summarize, section 5.5; tick K1, K4, K5.
-  2. Commit, push, re-dispatch CI on the final commit; green ticks K6. Then stop.
+  - The gate VM halves with the fixed harness (`sched-vm-a`, `sched-vm-a2` light; `sched-vm-b`
+    strict 4 min; `sched-vm-tiny2` light after the quanta moved to the cycle counter), and
+    the Mac `tiny` rerun on the committed code (`sched-mac-tiny3`): sections 5.1 and 5.5.
+- Doing: nothing; stopped on the coordinator's word once the final CI run is recorded.
+- Next (for the lead and the developer):
+  1. The developer builds R1 to R3 from section 6, corrections first (the untimed futex per
+     worker, `sleep_until` on one timed wait, cancel returning items, narrow `help_until`,
+     cycle-counter quanta, the ticket invariant, the defaults, and the two lifetime races
+     with a churn test).
+  2. Open for the performance engineer (6, R2): the 0.8 to 0.9 share of a bursting group,
+     the one-group spinlock case, and locality with real index data.
+  3. For the lead: the gate VM's hpet clocksource (31 µs per `clock_gettime`, 0.4 ms wakes)
+     taxes every per-task timestamp in strata's VM harnesses; latency floors need bare metal.
 - Blocked on: nothing. For the lead: the gate VM's `hpet` clocksource (31 µs per
   `clock_gettime`, 0.4 ms wakes) taxes every per-task timestamp in strata's VM harnesses and
   makes the VM unfit for latency floors; worth `clocksource=` work or bare metal for those rows.
