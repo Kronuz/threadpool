@@ -129,6 +129,10 @@ public:
 
 	unsigned num_unparked() const noexcept { return unparked(_state.load(std::memory_order_relaxed)); }
 	unsigned num_searching() const noexcept { return searching(_state.load(std::memory_order_relaxed)); }
+	std::size_t num_sleepers() {
+		std::lock_guard<std::mutex> lk(_mu);
+		return _sleepers.size();
+	}
 };
 
 }  // namespace research

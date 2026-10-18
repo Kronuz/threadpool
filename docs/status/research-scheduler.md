@@ -77,12 +77,22 @@
     of user time; section 5.6, and the corrections at the top of section 6 (untimed futex per
     worker, `sleep_until` on one timed futex wait, cancel returns items, narrow `help_until`,
     cycle-counter time, the ticket invariant, defaults).
-- Doing: the background driver `.scratch/drive2.sh`: the FreeBSD reruns (light), then the gate
-  VM halves (`sched-vm-a` light: tiny at 200k tasks, idle, memory, three trials; `sched-vm-b`
-  strict 4 min: tail at 2 s and makespan, two trials), then the copy back.
+  - The coordinator's hang (two lifetime races, `research/pools.hh`): the shutdown lost its
+    wakeup (a worker registering as a sleeper after `stop()`'s unpark slept forever), and a
+    group freed while a worker still held its ticket (the owner sees the last task's latch
+    before the ticket drops; the worker spun on the freed spinlock, the 100% of one core).
+    Found with the harness's new per-pool watchdog (`timeout=`, `TIMEOUT pool=... phase=...`
+    with idle counters and per-worker states); both fixed; churn of 40 create-run-destroy
+    cycles per pool and 8 saturated `tail` trials pass on the VM. Correction 8 in section 6.
+- Host note (2026-10-18): my first driver's VM half outlived its killed `ssh` and ran unheld
+  for 5h36m (the hang above, 100% of one core) beside other agents' gate-VM numbers from
+  01:28 to 07:04, when the coordinator killed it. Every VM command now runs under `timeout`
+  bounded by its hold, and every VM run holds at least light.
+- Doing: the gate VM halves with the fixed harness (`sched-vm-a` light: tiny at 100k tasks,
+  idle, memory, three trials; `sched-vm-b` strict ≤ 4 min: tail at 2 s and makespan, two
+  trials), in the foreground with remote timeouts.
 - Next:
-  1. FreeBSD rerun numbers into 5.6 (the `_umtx_op` variance and the timed-sleep row), the
-     VM tables into 5.5; tick K1, K4, K5.
+  1. Copy the VM files back, summarize, section 5.5; tick K1, K4, K5.
   2. Commit, push, re-dispatch CI on the final commit; green ticks K6. Then stop.
 - Blocked on: nothing. For the lead: the gate VM's `hpet` clocksource (31 µs per
   `clock_gettime`, 0.4 ms wakes) taxes every per-task timestamp in strata's VM harnesses and

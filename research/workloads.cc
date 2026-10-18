@@ -37,6 +37,41 @@ struct Latch {
 	}
 };
 
+// The latch a workload is waiting on, for the watchdog's report.
+std::atomic<const std::atomic<std::uint32_t>*> g_watched{nullptr};
+
+// Fails a run that hangs: after `seconds`, prints the pool's state and exits with 3, so a
+// stuck pool is a finding and not a process that outlives its hold.
+class Watchdog {
+	std::mutex _mu;
+	std::condition_variable _cv;
+	bool _done = false;
+	std::atomic<Pool*> _pool{nullptr};
+	std::atomic<bool> _shutdown{false};
+	std::thread _th;
+
+public:
+	Watchdog(const char* workload, const std::string& pool_name, unsigned seconds) : _th([this, workload, pool_name, seconds] {
+		std::unique_lock<std::mutex> lk(_mu);
+		if (_cv.wait_for(lk, std::chrono::seconds(seconds), [&] { return _done; })) { return; }
+		std::fflush(stdout);
+		std::fprintf(stderr, "TIMEOUT pool=%s workload=%s after %u s", pool_name.c_str(), workload, seconds);
+		if (auto* w = g_watched.load(std::memory_order_acquire)) { std::fprintf(stderr, " latch_remaining=%u", w->load(std::memory_order_relaxed)); }
+		std::fprintf(stderr, " phase=%s\n", _shutdown.load(std::memory_order_acquire) ? "shutdown" : "running");
+		// During shutdown the pool's destructor body is still running, so its members stand.
+		if (Pool* p = _pool.load(std::memory_order_acquire)) { p->dump(stderr); }
+		std::fflush(stderr);
+		std::_Exit(3);
+	}) {}
+	void watch(Pool* p) noexcept { _pool.store(p, std::memory_order_release); }
+	void shutdown() noexcept { _shutdown.store(true, std::memory_order_release); }
+	~Watchdog() {
+		{ std::lock_guard<std::mutex> lk(_mu); _done = true; }
+		_cv.notify_all();
+		_th.join();
+	}
+};
+
 inline void burn(std::uint64_t ns) noexcept {
 	if (ns == 0) { return; }
 	if (ns >= 2000) { burn_ns_clock(ns); } else { burn_ns(ns); }
@@ -98,6 +133,7 @@ struct Args {
 	unsigned query_us = 20;
 	unsigned query_interval_us = 1000;
 	unsigned flush_tasks = 64;
+	unsigned timeout = 0;       // seconds per pool and trial; 0: a default per workload
 };
 
 Args parse(int argc, char** argv) {
@@ -131,6 +167,7 @@ Args parse(int argc, char** argv) {
 		else if (k == "query_us") { a.query_us = std::stoul(v); }
 		else if (k == "query_interval_us") { a.query_interval_us = std::stoul(v); }
 		else if (k == "flush_tasks") { a.flush_tasks = std::stoul(v); }
+		else if (k == "timeout") { a.timeout = std::stoul(v); }
 		else { std::fprintf(stderr, "unknown arg %s\n", k.c_str()); std::exit(2); }
 	}
 	return a;
@@ -159,6 +196,7 @@ struct Groups {
 void tiny(const Args& a, Pool& pool) {
 	Groups groups(pool, a.groups);
 	Latch latch;
+	g_watched.store(&latch.remaining, std::memory_order_release);
 	if (a.producers == 0) {
 		const unsigned chains = pool.workers() * 4;
 		std::vector<Job> jobs(chains);
@@ -420,9 +458,15 @@ int main(int argc, char** argv) {
 	std::printf("workloads: %s threads=%u trials=%u pools=", a.workload.c_str(), a.threads, a.trials);
 	for (auto& p : a.pools) { std::printf("%s,", p.c_str()); }
 	std::printf("\n");
+	unsigned timeout = a.timeout;
+	if (!timeout) {
+		timeout = a.workload == "tail" || a.workload == "idle" ? unsigned(a.seconds) + 60 : 120;
+	}
 	for (unsigned trial = 0; trial < a.trials; ++trial) {
 		for (auto& name : a.pools) {
+			Watchdog dog(a.workload.c_str(), name, timeout);
 			auto pool = make_pool(name, a.threads);
+			dog.watch(pool.get());
 			if (a.workload == "tiny") { tiny(a, *pool); }
 			else if (a.workload == "tail") { tail(a, *pool); }
 			else if (a.workload == "makespan") { makespan(a, *pool); }
@@ -430,6 +474,10 @@ int main(int argc, char** argv) {
 			else if (a.workload == "memory") { memory(a, *pool); }
 			else { std::fprintf(stderr, "unknown workload %s\n", a.workload.c_str()); return 2; }
 			std::fflush(stdout);
+			g_watched.store(nullptr, std::memory_order_release);
+			dog.shutdown();  // the pool's shutdown is the watchdog's last phase
+			pool.reset();
+			dog.watch(nullptr);
 		}
 	}
 	return 0;

@@ -59,6 +59,8 @@ public:
 	virtual void close(Group* g) = 0;
 	virtual void post(Task* t) = 0;
 	virtual std::size_t group_bytes() const = 0;
+	// The pool's internal state, for the harness watchdog when a run hangs.
+	virtual void dump(FILE*) {}
 	// Whether the calling thread is one of this pool's workers.
 	bool on_worker() const noexcept { return tls_pool == this; }
 };
@@ -82,6 +84,9 @@ public:
 	}
 	const char* name() const override { return "baseline"; }
 	unsigned workers() const override { return _n; }
+	void dump(FILE* f) override {
+		std::fprintf(f, "  baseline: queued=%zu running=%zu workers=%zu\n", _pool.size(), _pool.running_size(), _pool.threadpool_workers());
+	}
 	Group* open(unsigned width) override { return new G(_pool, width); }
 	void close(Group* g) override { delete static_cast<G*>(g); }
 	void post(Task* t) override {
@@ -102,6 +107,9 @@ public:
 	}
 	const char* name() const override { return "raw"; }
 	unsigned workers() const override { return _n; }
+	void dump(FILE* f) override {
+		std::fprintf(f, "  raw: queued=%zu running=%zu workers=%zu\n", _pool.size(), _pool.running_size(), _pool.threadpool_workers());
+	}
 	Group* open(unsigned width) override { auto* g = new Group; g->width = width; return g; }
 	void close(Group* g) override { delete g; }
 	void post(Task* t) override { _pool.enqueue([t] { t->fn(t); }); }
@@ -113,20 +121,38 @@ public:
 
 class ThreadedPool : public Pool {
 protected:
+	enum WorkerState : int { W_RUNNING = 0, W_SEARCHING = 1, W_PARKING = 2, W_PARKED = 3, W_EXITED = 4 };
+
 	unsigned _n;
 	Idle _idle;
 	std::atomic<bool> _stop{false};
 	std::vector<std::thread> _threads;
+	std::unique_ptr<std::atomic<int>[]> _wstate;  // per worker, for the watchdog's dump
 	unsigned _spin_us;
 
-	explicit ThreadedPool(unsigned n, unsigned spin_us) : _n(n), _idle(n), _spin_us(spin_us) {}
+	explicit ThreadedPool(unsigned n, unsigned spin_us) : _n(n), _idle(n), _wstate(new std::atomic<int>[n]), _spin_us(spin_us) {
+		for (unsigned i = 0; i < n; ++i) { _wstate[i].store(W_RUNNING, std::memory_order_relaxed); }
+	}
 
 	template <typename Self>
 	void start(Self* self) {
 		_threads.reserve(_n);
 		for (unsigned i = 0; i < _n; ++i) {
-			_threads.emplace_back([self, i] { self->run(i); });
+			_threads.emplace_back([self, i] {
+				self->run(i);
+				self->_wstate[i].store(W_EXITED, std::memory_order_relaxed);
+			});
 		}
+	}
+
+	void dump_workers(FILE* f) {
+		static const char* const names[] = {"run", "search", "parking", "parked", "exited"};
+		std::fprintf(f, "  workers:");
+		for (unsigned i = 0; i < _n; ++i) {
+			int s = _wstate[i].load(std::memory_order_relaxed);
+			std::fprintf(f, " %u=%s", i, s >= 0 && s <= 4 ? names[s] : "?");
+		}
+		std::fprintf(f, "\n");
 	}
 
 	void stop() {
@@ -140,24 +166,34 @@ protected:
 	template <typename Pending>
 	bool park(unsigned idx, bool& searching, Pending&& pending) {
 		if (_stop.load(std::memory_order_acquire)) { return false; }
+		_wstate[idx].store(W_PARKING, std::memory_order_relaxed);
 		// Spin first, still unregistered: a burst arriving within spin_us costs no syscall.
 		if (_spin_us) {
 			auto end = now_ns() + std::uint64_t(_spin_us) * 1000;
 			while (now_ns() < end) {
-				if (pending()) { return true; }
+				if (pending()) { _wstate[idx].store(W_RUNNING, std::memory_order_relaxed); return true; }
 				cpu_relax();
 			}
 		}
 		bool final_check = false;
 		auto observed = _idle.to_parked(idx, searching, &final_check);
 		searching = false;
-		if (final_check && pending()) {
+		// Registered now. A stop that ran before the registration unparked nobody here, so
+		// the flag is checked again after it (to_parked's mutex orders the two); without this
+		// a worker slept through stop() on the gate VM and join() never returned.
+		bool stopping = _stop.load(std::memory_order_acquire);
+		if (stopping || (final_check && pending())) {
 			if (_idle.unpark_self(idx)) {
+				_wstate[idx].store(W_RUNNING, std::memory_order_relaxed);
+				if (stopping) { return false; }
 				searching = _idle.to_searching();
 				return true;
 			}
+			// Someone unparked us meanwhile: the park below returns at once.
 		}
+		_wstate[idx].store(W_PARKED, std::memory_order_relaxed);
 		_idle.park(idx, observed);
+		_wstate[idx].store(W_SEARCHING, std::memory_order_relaxed);
 		searching = true;  // a notified worker searches first
 		return !_stop.load(std::memory_order_acquire);
 	}
@@ -168,6 +204,11 @@ protected:
 			searching = false;
 			if (_idle.from_searching()) { _idle.notify_one(); }
 		}
+	}
+
+	void dump_idle(FILE* f) {
+		std::fprintf(f, "  idle: searching=%u unparked=%u sleepers=%zu stop=%d\n", _idle.num_searching(), _idle.num_unparked(), _idle.num_sleepers(), int(_stop.load(std::memory_order_relaxed)));
+		dump_workers(f);
 	}
 
 public:
@@ -277,6 +318,12 @@ public:
 	Group* open(unsigned width) override { auto* g = new Group; g->width = width; return g; }
 	void close(Group* g) override { delete g; }
 	std::size_t group_bytes() const override { return sizeof(Group); }
+	void dump(FILE* f) override {
+		dump_idle(f);
+		std::fprintf(f, "  steal: inject=%zu deques:", _inject.size());
+		for (auto& w : _workers) { std::fprintf(f, " %lld%s", static_cast<long long>(w->deque.size()), w->lifo ? "+L" : ""); }
+		std::fprintf(f, "\n");
+	}
 
 	void post(Task* t) override {
 		if (on_worker()) {
@@ -473,8 +520,26 @@ public:
 
 	const char* name() const override { return _name.c_str(); }
 	Group* open(unsigned width) override { auto* g = new G; g->width = width; return g; }
-	void close(Group* g) override { delete static_cast<G*>(g); }
+	// A ticket outlives the task that earned it (the worker drops it under the lock after the
+	// task's completion is visible to the owner), so a group is freed only once no worker holds
+	// one; freeing it earlier left a worker spinning on the freed spinlock for hours.
+	void close(Group* gg) override {
+		auto* g = static_cast<G*>(gg);
+		for (;;) {
+			g->mu.lock();
+			bool busy = false;
+			for (auto& f : g->q) { busy = busy || f.tickets != 0 || f.pending != 0; }
+			g->mu.unlock();
+			if (!busy) { break; }
+			std::this_thread::yield();
+		}
+		delete g;
+	}
 	std::size_t group_bytes() const override { return sizeof(G); }
+	void dump(FILE* f) override {
+		dump_idle(f);
+		std::fprintf(f, "  groups: ready=%zu/%zu/%zu\n", _ready[0].list.size(), _ready[1].list.size(), _ready[2].list.size());
+	}
 
 	void post(Task* t) override {
 		G* g = static_cast<G*>(t->group);
@@ -558,6 +623,10 @@ public:
 		if (opt.spin_us) { _nm += "-spin"; }
 	}
 	const char* name() const override { return _nm.c_str(); }
+	void dump(FILE* f) override {
+		GroupPool::dump(f);
+		std::fprintf(f, "  prio: busy_bg=%u busy_merge=%u reserve=%u merge_cap=%u\n", _busy_bg.load(std::memory_order_relaxed), _busy_merge.load(std::memory_order_relaxed), _reserve, _merge_cap);
+	}
 
 	void run_prio(unsigned idx) {
 		tls_pool = this;
@@ -597,7 +666,12 @@ public:
 
 	void begin_prio() {
 		_threads.reserve(_n);
-		for (unsigned i = 0; i < _n; ++i) { _threads.emplace_back([this, i] { run_prio(i); }); }
+		for (unsigned i = 0; i < _n; ++i) {
+			_threads.emplace_back([this, i] {
+				run_prio(i);
+				_wstate[i].store(W_EXITED, std::memory_order_relaxed);
+			});
+		}
 	}
 };
 
@@ -688,6 +762,12 @@ public:
 	}
 	void close(Group* g) override { delete static_cast<G*>(g); }
 	std::size_t group_bytes() const override { return sizeof(G); }
+	void dump(FILE* f) override {
+		dump_idle(f);
+		std::fprintf(f, "  home: overflow=%zu inboxes:", _overflow.size());
+		for (auto& w : _workers) { std::fprintf(f, " %zu", w->inbox.size()); }
+		std::fprintf(f, "\n");
+	}
 
 	void post(Task* t) override {
 		auto* g = static_cast<G*>(t->group);

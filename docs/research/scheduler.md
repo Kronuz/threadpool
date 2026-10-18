@@ -576,6 +576,31 @@ time per handoff, the hpet clock reads of section 2.
    order everywhere (a LIFO slot only for same-group continuations, capped at 3 polls).
    `reserve = 2` bought p50 12 to 28 µs against 30 to 40 (5.2) at one more idle core; the
    host chooses.
+8. **Two lifetime races, found by a hang on the gate VM; the real pool must close both.**
+   A `tiny` run with one group and one producer hung there twice (once for five and a half
+   hours beside other agents' measurements: a killed `ssh` does not kill the remote process),
+   and the harness's watchdog (`TIMEOUT pool=... phase=...` with the idle counters and each
+   worker's state on stderr) separated two causes.
+   - *The stop lost its wakeup.* `stop()` sets the flag and unparks every registered sleeper;
+     a worker that passed its stop check and registered itself just after that unpark slept
+     forever on its futex, and `join()` waited on it (the process had two threads left, both
+     in `futex_wait`). Fix (`research/pools.hh`, `park()`): after `to_parked()` registers the
+     worker under the idle mutex, load the stop flag again; the stopper stores it before it
+     takes that mutex, so the load sees it and the worker unregisters and exits. The last
+     searcher's final check for work sits after the registration for the same reason.
+   - *A group was freed while a worker still held its ticket.* The owner observes the last
+     task's completion (the latch) before the worker that ran it has dropped the group's
+     ticket under the group's lock, and a second ticket from fan-out may still be on the
+     ready-list; the harness freed the group at once, and the worker spun on the freed
+     spinlock: 100% of one core forever, `workers: 3=search`, every other worker exited, the
+     ready-lists empty. Fix: `close()` waits until the group holds no ticket and no pending
+     item. In the API this is `~WorkGroup()`: `cancel_and_wait()` must wait for the tickets,
+     not for the tasks, exactly as today's `TaskGroup` keeps its state alive through the
+     ticket's `shared_ptr`.
+   Both fixes passed a churn of 40 create, run, destroy cycles for every pool and 8 trials of
+   the saturated `tail` on the VM. Build the real pool's shutdown and group close this way,
+   keep a churn test under a watchdog, and run every VM command under `timeout` for at most
+   its hold.
 
 The three, in the order to build them; each is additive to `threadpool` (Detent links the
 library through `scheduler` and keeps `ThreadPool<TaskType, thread_policy>`, which does not
