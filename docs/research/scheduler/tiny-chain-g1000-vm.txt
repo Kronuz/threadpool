@@ -1,0 +1,22 @@
+workloads: tiny threads=8 trials=3 pools=steal,steal-lifo,groups,prio,home,taskflow,moodycamel,
+tiny pool=steal          groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.018s rate=112.43M/s ns_per_task=8.9 cpu_ns_per_task=59.0
+tiny pool=steal-lifo     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.021s rate=95.26M/s ns_per_task=10.5 cpu_ns_per_task=72.3
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.032s rate=61.91M/s ns_per_task=16.2 cpu_ns_per_task=109.6
+tiny pool=prio-r1-m7     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.033s rate=59.77M/s ns_per_task=16.7 cpu_ns_per_task=105.6
+tiny pool=home           groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.042s rate=47.70M/s ns_per_task=21.0 cpu_ns_per_task=155.7
+tiny pool=taskflow       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.300s rate=6.66M/s ns_per_task=150.0 cpu_ns_per_task=1187.5
+tiny pool=moodycamel     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.339s rate=5.90M/s ns_per_task=169.6 cpu_ns_per_task=1278.9
+tiny pool=steal          groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.020s rate=100.31M/s ns_per_task=10.0 cpu_ns_per_task=68.3
+tiny pool=steal-lifo     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.024s rate=82.35M/s ns_per_task=12.1 cpu_ns_per_task=69.9
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.026s rate=77.53M/s ns_per_task=12.9 cpu_ns_per_task=96.0
+tiny pool=prio-r1-m7     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.034s rate=58.69M/s ns_per_task=17.0 cpu_ns_per_task=113.4
+tiny pool=home           groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.043s rate=46.42M/s ns_per_task=21.5 cpu_ns_per_task=158.9
+tiny pool=taskflow       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.288s rate=6.96M/s ns_per_task=143.8 cpu_ns_per_task=1126.2
+tiny pool=moodycamel     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.357s rate=5.59M/s ns_per_task=178.7 cpu_ns_per_task=1340.4
+tiny pool=steal          groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.031s rate=63.63M/s ns_per_task=15.7 cpu_ns_per_task=79.4
+tiny pool=steal-lifo     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.021s rate=96.59M/s ns_per_task=10.4 cpu_ns_per_task=70.7
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.032s rate=62.56M/s ns_per_task=16.0 cpu_ns_per_task=106.7
+tiny pool=prio-r1-m7     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.038s rate=52.48M/s ns_per_task=19.1 cpu_ns_per_task=125.3
+tiny pool=home           groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.045s rate=44.32M/s ns_per_task=22.6 cpu_ns_per_task=168.4
+tiny pool=taskflow       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.300s rate=6.67M/s ns_per_task=149.8 cpu_ns_per_task=1185.0
+tiny pool=moodycamel     groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.340s rate=5.88M/s ns_per_task=170.0 cpu_ns_per_task=1320.1

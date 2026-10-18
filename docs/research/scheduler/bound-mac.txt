@@ -1,0 +1,26 @@
+bound: 16 hardware threads, futex = os_sync_wait_on_address, 2000000 iterations
+bound: churn rate 0.396 iterations/ns
+bound steady_clock::now()                                    47.3 ns
+bound std::mutex lock + unlock, uncontended                  19.8 ns
+bound atomic fetch_add relaxed, one thread                    4.9 ns
+bound atomic fetch_add seq_cst, one thread                    4.9 ns
+bound atomic CAS (success), one thread                        8.7 ns
+bound atomic_thread_fence(seq_cst)                            0.0 ns
+bound mutex + std::deque push_back + pop_front               40.9 ns
+bound Chase-Lev push + pop (owner, LIFO)                     23.1 ns
+bound Chase-Lev push + steal (same thread, FIFO)             23.0 ns
+bound bounded MPMC ring push + pop, one thread               19.7 ns
+bound std::function assign (24-byte capture) + call          17.4 ns
+bound make_unique<std::function> (TaskGroup's box)            5.0 ns
+bound sched_yield()                                         895.5 ns
+bound syscall floor (getppid)                               436.2 ns
+bound cross-core line round trip (spin, 2 threads)          139.4 ns
+bound futex ping-pong round trip (both sleep)             11431.9 ns
+wake latency: std::condition_variable notify_one n=3000     min=4720 ns    p50=10.7 us    p90=38.6 us    p99=76.9 us    p99.9=302.6 us   max=322.8 us   mean=17.9 us
+wake latency: std::atomic<uint32_t>::wait/notify_one n=3000     min=4306 ns    p50=10.0 us    p90=37.2 us    p99=62.9 us    p99.9=258.5 us   max=556.0 us   mean=16.9 us
+wake latency: os_sync_wait_on_address wake   n=3000     min=4897 ns    p50=9938 ns    p90=38.6 us    p99=64.4 us    p99.9=315.8 us   max=601.6 us   mean=17.4 us
+bound SPSC handoff: mutex + std::deque (today's queue)       84.5 ns
+bound SPSC handoff: bounded MPMC ring (Vyukov)               12.3 ns
+bound SPSC handoff: Chase-Lev push / steal                   58.9 ns
+bound MPMC 4x4 contended: mutex + std::deque                185.5 ns
+bound MPMC 4x4 contended: bounded MPMC ring (Vyukov)        124.0 ns

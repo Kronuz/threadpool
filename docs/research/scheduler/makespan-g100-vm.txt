@@ -1,0 +1,13 @@
+workloads: makespan threads=8 trials=2 pools=baseline,steal,groups,groups-q1ms,prio,home,
+makespan pool=baseline       groups=100    flush=64x1ms alone=16.74 ms (ideal 8000.0 us) beside=180.51 ms (nominal fair-share 808.00 ms, x0.22) share=6.28 bg_tasks_per_s_during=5350 fairness=0.945
+makespan pool=steal          groups=100    flush=64x1ms alone=12.20 ms (ideal 8000.0 us) beside=11.00 ms (nominal fair-share 808.00 ms, x0.01) share=83.95 bg_tasks_per_s_during=1179 fairness=0.989
+makespan pool=groups         groups=100    flush=64x1ms alone=13.66 ms (ideal 8000.0 us) beside=1279.63 ms (nominal fair-share 808.00 ms, x1.58) share=0.90 bg_tasks_per_s_during=5555 fairness=1.000
+makespan pool=groups-q1000us groups=100    flush=64x1ms alone=14.06 ms (ideal 8000.0 us) beside=1305.98 ms (nominal fair-share 808.00 ms, x1.62) share=0.88 bg_tasks_per_s_during=5606 fairness=1.000
+makespan pool=prio-r1-m7     groups=100    flush=64x1ms alone=15.40 ms (ideal 8000.0 us) beside=1490.49 ms (nominal fair-share 808.00 ms, x1.84) share=0.92 bg_tasks_per_s_during=4684 fairness=0.999
+makespan pool=home           groups=100    flush=64x1ms alone=12.96 ms (ideal 8000.0 us) beside=101.29 ms (nominal fair-share 808.00 ms, x0.13) share=11.14 bg_tasks_per_s_during=5094 fairness=0.996
+makespan pool=baseline       groups=100    flush=64x1ms alone=15.23 ms (ideal 8000.0 us) beside=182.15 ms (nominal fair-share 808.00 ms, x0.23) share=6.25 bg_tasks_per_s_during=5329 fairness=0.960
+makespan pool=steal          groups=100    flush=64x1ms alone=13.66 ms (ideal 8000.0 us) beside=11.13 ms (nominal fair-share 808.00 ms, x0.01) share=88.55 bg_tasks_per_s_during=805 fairness=0.987
+makespan pool=groups         groups=100    flush=64x1ms alone=14.01 ms (ideal 8000.0 us) beside=1198.94 ms (nominal fair-share 808.00 ms, x1.48) share=0.96 bg_tasks_per_s_during=5589 fairness=1.000
+makespan pool=groups-q1000us groups=100    flush=64x1ms alone=13.95 ms (ideal 8000.0 us) beside=1266.74 ms (nominal fair-share 808.00 ms, x1.57) share=0.91 bg_tasks_per_s_during=5560 fairness=1.000
+makespan pool=prio-r1-m7     groups=100    flush=64x1ms alone=16.16 ms (ideal 8000.0 us) beside=1306.45 ms (nominal fair-share 808.00 ms, x1.62) share=1.02 bg_tasks_per_s_during=4780 fairness=0.999
+makespan pool=home           groups=100    flush=64x1ms alone=13.44 ms (ideal 8000.0 us) beside=99.58 ms (nominal fair-share 808.00 ms, x0.12) share=10.51 bg_tasks_per_s_during=5531 fairness=0.995

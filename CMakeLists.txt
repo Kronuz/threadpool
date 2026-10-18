@@ -81,4 +81,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # A runnable tour of the library (not a test): build & run ./build/threadpool_demo
   add_executable(threadpool_demo examples/demo.cc)
   target_link_libraries(threadpool_demo PRIVATE threadpool)
+
+  # Scheduler research prototypes (docs/research/scheduler.md); off by default.
+  option(THREADPOOL_BUILD_RESEARCH "Build the scheduler research prototypes and benchmarks" OFF)
+  if(THREADPOOL_BUILD_RESEARCH)
+    add_subdirectory(research)
+  endif()
 endif()

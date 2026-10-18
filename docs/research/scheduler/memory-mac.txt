@@ -1,0 +1,6 @@
+workloads: memory threads=16 trials=1 pools=baseline,steal,groups,prio,home,
+memory pool=baseline       groups=10000 sizeof_group=232 rss_delta_per_group=284 bytes rss_delta=2.71 MiB
+memory pool=steal          groups=10000 sizeof_group=16 rss_delta_per_group=16 bytes rss_delta=0.15 MiB
+memory pool=groups         groups=10000 sizeof_group=128 rss_delta_per_group=199 bytes rss_delta=1.90 MiB
+memory pool=prio-r1-m15    groups=10000 sizeof_group=128 rss_delta_per_group=0 bytes rss_delta=0.00 MiB
+memory pool=home           groups=10000 sizeof_group=64 rss_delta_per_group=8 bytes rss_delta=0.08 MiB

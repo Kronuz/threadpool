@@ -1,0 +1,13 @@
+workloads: idle threads=16 trials=1 pools=baseline,raw,steal,steal-spin,groups,groups-spin,prio,prio-r2,home,home-spin,taskflow,moodycamel,
+idle pool=baseline       workers=16 seconds=3.0 cpu=0.3540% (of one core) context_switches_per_s=283.1
+idle pool=raw            workers=16 seconds=3.0 cpu=0.4680% (of one core) context_switches_per_s=328.8
+idle pool=steal          workers=16 seconds=3.0 cpu=0.0008% (of one core) context_switches_per_s=0.3
+idle pool=steal-spin     workers=16 seconds=3.0 cpu=0.0012% (of one core) context_switches_per_s=0.3
+idle pool=groups         workers=16 seconds=3.0 cpu=0.0008% (of one core) context_switches_per_s=0.3
+idle pool=groups-spin    workers=16 seconds=3.0 cpu=0.0009% (of one core) context_switches_per_s=0.3
+idle pool=prio-r1-m15    workers=16 seconds=3.0 cpu=0.0008% (of one core) context_switches_per_s=0.3
+idle pool=prio-r2-m14    workers=16 seconds=3.0 cpu=0.0009% (of one core) context_switches_per_s=0.3
+idle pool=home           workers=16 seconds=3.0 cpu=0.0006% (of one core) context_switches_per_s=0.3
+idle pool=home-spin      workers=16 seconds=3.0 cpu=0.0008% (of one core) context_switches_per_s=0.3
+idle pool=taskflow       workers=16 seconds=3.0 cpu=0.0008% (of one core) context_switches_per_s=0.3
+idle pool=moodycamel     workers=16 seconds=3.0 cpu=0.0009% (of one core) context_switches_per_s=0.3

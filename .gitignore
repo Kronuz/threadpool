@@ -4,3 +4,4 @@ build/
 test/test
 test/task_group
 /tmp/
+.scratch/
