@@ -486,39 +486,50 @@ kernel time per handoff, `now_ns` the signal-to-running latency. Then 2,000 time
 that time out, what a `sleep_until` pays per call. Light holds, two threads
 (`handoff-mac.txt`, `handoff-freebsd.txt`, `handoff-freebsd-reruns.txt`, `handoff-vm.txt`).
 
-| per handoff | macOS 15 (Mac): sys / user µs, cs | FreeBSD 14.4 (VM, 4 vCPUs): sys / user µs, cs | latency p50 FreeBSD |
-|---|---|---|---|
-| spin, no sleep (the floor) | 0.09 / 40.7, 0 | 0.39 / 117.5, 0 | 9 µs |
-| condvar, `notify_one` under the lock | 3.46 / 28.4, 1.0 | 15.8 / 96.1, 1.0 | 41 µs |
-| condvar, `notify_one` after unlock | 3.57 / 28.7, 1.0 | 20.3 / 98.9, 1.0 | 42 µs |
-| condvar `wait_for` 100 ms (today's pool worker) | 4.07 / 29.3, 1.0 | **98.5** / 271, 1.8 | 150 µs |
-| `std::atomic::wait` / `notify_one` | 3.14 / 31.7, 1.0 | 5.7 / **268**, 2.3 | 27 µs |
-| raw futex (`os_sync_wait_on_address`; `_umtx_op`) | 3.13 / 27.6, 1.0 | 36.9 / 102.8, 1.0 | 59 µs |
+Three FreeBSD runs: the first right after a strict hold ended (a quiet host), the two reruns
+with other agents' jobs live; the spread between them is the VM's, so read the columns as
+ranges and the rows against each other.
 
-| per timed sleep of 1 ms that times out | macOS: sys / user µs | FreeBSD: sys / user µs |
+| per handoff | macOS 15 (Mac): sys / user µs, cs | FreeBSD 14.4 (VM, 4 vCPUs), three runs: sys µs | FreeBSD user µs, cs | latency p50 FreeBSD |
+|---|---|---|---|---|
+| spin, no sleep (the floor) | 0.09 / 40.7, 0 | 0.4, 0.0, 0.0 | 118–210, 0 | 9–18 µs |
+| condvar, `notify_one` under the lock | 3.46 / 28.4, 1.0 | 15.8, 102, 68 | 96–140, 1.0 | 41–78 µs |
+| condvar, `notify_one` after unlock | 3.57 / 28.7, 1.0 | 20.3, 71, 61 | 99–141, 1.0 | 42–76 µs |
+| condvar `wait_for` 100 ms (today's pool worker) | 4.07 / 29.3, 1.0 | **98.5, 135, 152** | **271–513**, 1.8 | **150–373 µs** |
+| `std::atomic::wait` / `notify_one` | 3.14 / 31.7, 1.0 | 5.7, 76, 62 | **268–377**, 1.8–2.3 | 27–80 µs |
+| raw futex (`os_sync_wait_on_address`; `_umtx_op`) | 3.13 / 27.6, 1.0 | 36.9, 68, 59 | 103–134, 1.0 | 59–72 µs |
+
+| per timed sleep of 1 ms that times out | macOS: sys / user µs | FreeBSD, two runs: sys / user µs |
 |---|---|---|
-| condvar `wait_for` | 8.6 / 5.4 | (reruns) |
-| `nanosleep` | 7.0 / 3.3 | (reruns) |
-| futex with a timeout | 6.5 / 1.5 | (reruns) |
+| condvar `wait_for` | 8.6 / 5.4 | 66, 53 / 89, 91 |
+| `nanosleep` | 7.0 / 3.3 | 82, 74 / 28, 30 |
+| futex with a timeout (`_umtx_op` with `_umtx_time`) | 6.5 / 1.5 | 72, 75 / 32, 32 |
 
-Reading: on macOS a wake is 3 to 4 µs of kernel time whatever the primitive; on FreeBSD an
-untimed condvar wake is 16 to 20 µs, the raw `_umtx_op` 37 µs (one run; the reruns will say
-whether that holds), and a **timed** condvar wake 98.5 µs with 1.8 context switches, five times
-the untimed one. `std::atomic::wait` shows the lowest kernel time there (5.7 µs) because
-FreeBSD's libc++ spins and yields first: 268 µs of user time and 2.3 switches per wake, which is
-why correction 1 says the raw call. The user-time columns include the producer's spinning.
+Reading: on macOS a wake is 3 to 4 µs of kernel time whatever the primitive. On FreeBSD it is
+16 to 100 µs, ten to twenty times more, and the untimed condvar and the raw `_umtx_op` are a
+wash (the first run had the condvar ahead, the reruns the reverse). The **timed** condvar wait
+is the consistent outlier: the most kernel time in every run, a second context switch per wake
+(1.8), two to four times the user time, and a wake latency of 150 to 373 µs against 41 to 78
+untimed. `std::atomic::wait` is the other outlier: FreeBSD's libc++ spins and yields before it
+blocks, 268 to 377 µs of user time and about two switches per wake, which is why correction 1
+says the raw call. A timed sleep that times out costs 53 to 82 µs of kernel time on FreeBSD
+whatever the primitive (macOS 6.5 to 8.6); the condvar form adds the mutex and the predicate,
+three times the user time of `nanosleep` or the futex. The user-time columns include the
+producer's spinning.
 
-What it says about the finding: a merge is handed off once, so the wake itself (37 against
-4 µs) cannot sum to seconds over a few hundred merges. The timed waits can: today's worker
-re-checks shutdown every 100 ms (10 wakes a second, negligible), but `pool_executor::
-sleep_until` is a timed condvar wait per call, and the merge path calls it from the rate
-limiter and in 10 ms steps, so each call costs about 100 µs of FreeBSD kernel time where the
-inline merge (an `inline_executor`, whose clock is virtual) sleeps for free. R1 as corrected
-(an untimed futex per worker, sleeps through one timed futex wait for the whole interval)
-removes both; whether it removes the whole 3× is for the developer to count: the number of
-`sleep_until` and `checkpoint` calls in a 500k run times the per-call costs above. The
-Linux gate VM's run (`handoff-vm.txt`) is unusable for this question: its spin floor alone
-shows 124 µs of kernel time per handoff, the hpet clock reads of section 2.
+What it says about the finding: a merge is handed off once, so the wake itself (60 to 100
+against 3 µs) cannot sum to seconds over a few hundred merges. The timed waits can: today's
+worker re-checks shutdown every 100 ms (10 wakes a second, negligible), but
+`pool_executor::sleep_until` is a timed condvar wait per call, and the merge path calls it from
+the rate limiter and in 10 ms steps, so each call costs 55 to 150 µs of FreeBSD kernel time
+where the inline merge (an `inline_executor`, whose clock is virtual) sleeps for free. Since
+every FreeBSD sleep costs about the same kernel time whichever primitive takes it, the lever is
+the **count**: wake a worker only when none is awake and searching (R1), never time out, and
+sleep once for a whole interval instead of in steps or per admitted block. Whether that
+removes the whole 3× is for the developer to count: the number of `sleep_until` and
+`checkpoint` calls in a 500k run times the per-call costs above. The Linux gate VM's run
+(`handoff-vm.txt`) is unusable for this question: its spin floor alone shows 124 µs of kernel
+time per handoff, the hpet clock reads of section 2.
 
 ## 6. Recommendations
 
@@ -537,8 +548,12 @@ shows 124 µs of kernel time per handoff, the hpet clock reads of section 2.
    form), woken early by the group's cancel through the same word. strata's
    `pool_executor::sleep_until` is a timed condvar wait per call, and the merge path calls it
    from the rate limiter (`rate_limiter.hh:34`) and in 10 ms steps (`index.hh:1097`): that,
-   not the one wake per merge, is where FreeBSD's kernel time can go (section 5.6 has the
-   per-call costs). Sleep once for the whole interval; the stop request ends it.
+   not the one wake per merge, is where FreeBSD's kernel time can go. On FreeBSD a timed sleep
+   costs 53 to 82 µs of kernel time whichever primitive takes it (section 5.6), so the
+   primitive buys little there and the count is the lever: sleep once for the whole interval
+   and let the stop request end it; never poll in steps; admit the rate limiter's work in
+   large grants. The futex form is still right: a third of the condvar's user time, and the
+   same word the cancel wakes.
 3. **Cancel does not run items.** `WorkGroup::cancel()` unlinks the queued items and hands
    them back on an intrusive list (`WorkItem* cancel() noexcept`, through `next`), so the owner
    frees or recycles them; running items observe `stop_requested()` as today's stop token.
