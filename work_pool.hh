@@ -79,6 +79,10 @@ class WorkPool;
 class WorkGroup;
 
 
+// What an item is for. Queries run first; flushes and merges never take the reserve.
+enum class WorkClass : std::uint8_t { query = 0, flush = 1, merge = 2 };
+
+
 // A unit of work, owned by the caller: the pool links it while queued and calls run once.
 // It must stay alive until run starts; run may destroy or repost it.
 struct WorkItem {
@@ -86,6 +90,7 @@ struct WorkItem {
 	WorkGroup* group = nullptr;  // nullptr: the pool's own group
 	WorkItem* next = nullptr;    // the pool's while queued; cancel()'s list after
 	std::uint32_t epoch = 0;     // the pool's: the group's epoch when the item started
+	WorkClass cls = WorkClass::flush;
 	std::uint8_t flags = 0;      // the pool's
 
 	// Whether the item's group was cancelled after the item started; call it from run.
@@ -387,13 +392,21 @@ struct BoxedItem : WorkItem {
 	void (*destroy)(BoxedItem*) noexcept = nullptr;
 };
 
-// One group's queue and its place in line. Everything here is under the group's lock.
+inline constexpr unsigned classes = 3;
+
+inline unsigned class_of(const WorkItem& item) noexcept {
+	auto c = static_cast<unsigned>(item.cls);
+	return c < classes ? c : static_cast<unsigned>(WorkClass::flush);
+}
+
+// One class of one group: its queue and its place in line, all under the group's lock.
 struct Lane {
 	WorkItem* head = nullptr;
 	WorkItem* tail = nullptr;
 	std::uint32_t pending = 0;   // queued items
 	std::uint32_t tickets = 0;   // turns on the ready ring or being served from it
 	std::uint32_t listed = 0;    // of those, on the ring now
+	std::uint32_t helpers = 0;   // waiting threads serving it outside the ring
 	std::int64_t deficit = 0;    // service owed back, in ticks (DRR's counter; <= 0)
 
 	void push(WorkItem* item) noexcept {
@@ -424,15 +437,27 @@ struct Lane {
 // ring frees it, so a group closes without waiting for its turn to come around.
 struct alignas(64) GroupState {
 	SpinLock mu;
-	Lane lane;                   // under mu
+	Lane lanes[classes];         // under mu, by WorkClass
 	std::uint32_t running = 0;   // items executing, under mu
-	std::uint32_t helpers = 0;   // waiting threads serving it outside the ring, under mu
 	std::uint32_t waiters = 0;   // threads in WorkGroup::wait(), under mu
-	unsigned width = 0;          // under mu; 0: no cap
+	unsigned width = 0;          // under mu; per class, 0: no cap
 	unsigned weight = 1;         // quanta per turn, under mu
 	bool owned = true;           // under mu; false once the WorkGroup is gone
 	std::atomic<std::uint32_t> epoch{0};  // cancel() bumps it
 	std::atomic<std::uint32_t> sleep{0};  // sleep_until()'s futex word; cancel() bumps it
+
+	std::uint32_t pending() const noexcept {
+		return lanes[0].pending + lanes[1].pending + lanes[2].pending;
+	}
+
+	bool unreferenced() const noexcept {
+		for (const auto& l : lanes) {
+			if (l.tickets || l.helpers) {
+				return false;
+			}
+		}
+		return true;
+	}
 };
 
 // The ready-list: Vyukov's bounded MPMC ring of group pointers, chained so it grows as
@@ -530,8 +555,8 @@ class ReadyRing {
 	}
 
 public:
-	explicit ReadyRing(std::size_t entries) {
-		_rings.push_back(std::make_unique<Ring>(pow2(entries)));
+	ReadyRing() {
+		_rings.push_back(std::make_unique<Ring>(pow2(0)));
 		_head.store(_rings.back().get(), std::memory_order_relaxed);
 		_tail.store(_rings.back().get(), std::memory_order_relaxed);
 	}
@@ -633,29 +658,40 @@ public:
 }  // namespace threadpool_detail
 
 
-// A fixed set of named workers shared by many WorkGroups. Idle workers park on a futex
-// each and use no CPU; post() never blocks or allocates.
+// A fixed set of named workers shared by many WorkGroups. Items run in class order,
+// queries first; `reserve` workers stay free of flush and merge work so a query never
+// waits for a long item to end, and merges hold at most `merge_cap` workers. Idle workers
+// park on a futex each and use no CPU; post() never blocks or allocates.
 class WorkPool {
 	friend threadpool_detail::WorkPoolWorker;
 	friend WorkGroup;
 	using GroupState = threadpool_detail::GroupState;
 	using Lane = threadpool_detail::Lane;
+	static constexpr unsigned query = static_cast<unsigned>(WorkClass::query);
+	static constexpr unsigned flush = static_cast<unsigned>(WorkClass::flush);
+	static constexpr unsigned merge = static_cast<unsigned>(WorkClass::merge);
 
 public:
 	struct Options {
 		unsigned threads = 0;              // 0: the hardware's concurrency
+		unsigned reserve = 1;              // workers kept free of flush and merge work
+		unsigned merge_cap = 0;            // workers merges may hold; 0: threads - reserve
 		std::chrono::nanoseconds quantum = std::chrono::microseconds(100);  // service per turn
 		const char* name_format = "W{:02}";  // a std::format string over the worker index
 	};
 
 private:
 	unsigned _n;
+	unsigned _bg_cap;                  // workers flush and merge turns may hold
+	unsigned _merge_cap;               // workers merge turns may hold
 	std::int64_t _quantum;             // in ticks
 	threadpool_detail::Idle _idle;
-	threadpool_detail::ReadyRing _ready;
+	threadpool_detail::ReadyRing _ready[threadpool_detail::classes];
 	std::atomic<bool> _stop{false};
-	alignas(64) std::atomic<unsigned> _extras{0};   // tickets beyond each group's first; at most _n
-	alignas(64) std::atomic<std::size_t> _states{1};  // group states alive, the pool's own included
+	alignas(64) std::atomic<unsigned> _busy_bg{0};     // workers in flush or merge turns
+	alignas(64) std::atomic<unsigned> _busy_merge{0};  // workers in merge turns
+	alignas(64) std::atomic<unsigned> _extras[threadpool_detail::classes] = {};  // tickets beyond each lane's first; each at most _n
+	alignas(64) std::atomic<std::size_t> _states{1};   // group states alive, the pool's own included
 	alignas(64) std::atomic<std::uint32_t> _group_wake{0};  // WorkGroup::wait()'s futex word
 	GroupState _own;                   // items posted without a group
 
@@ -671,42 +707,61 @@ private:
 
 	GroupState& state_of(const WorkItem& item) noexcept;
 
+	void reserve_rings(std::size_t states) {
+		for (auto& ring : _ready) {
+			ring.reserve(states + _n + 1);
+		}
+	}
+
 	unsigned cap(const GroupState& s) const noexcept {
 		return s.width && s.width < _n ? s.width : _n;
 	}
 
-	// Under s.mu: whether s may take one more ring ticket. Its first is free; more need
-	// queued work beyond its tickets, room under its width, an idle worker, and one of the
-	// pool's _n extras (more than one per worker could never run at once).
-	bool grant(GroupState& s) noexcept {
-		Lane& l = s.lane;
-		if (l.tickets + s.helpers == 0) {
+	// Whether a worker could take one more turn of class c: queries may use any idle
+	// worker, flushes and merges only those beyond the reserve, merges at most merge_cap.
+	bool spare(unsigned c) const noexcept {
+		auto unparked = _idle.num_unparked();
+		if (c == query) {
+			return unparked < _n;
+		}
+		if (unparked >= _bg_cap || _busy_bg.load(std::memory_order_relaxed) >= _bg_cap) {
+			return false;
+		}
+		return c != merge || _busy_merge.load(std::memory_order_relaxed) < _merge_cap;
+	}
+
+	// Under s.mu: whether lane c of s may take one more ring ticket. Its first is free;
+	// more need queued work beyond its tickets, room under its width, a spare worker, and
+	// one of the class's _n extras (more than one per worker could never run at once).
+	bool grant(GroupState& s, unsigned c) noexcept {
+		Lane& l = s.lanes[c];
+		if (l.tickets + l.helpers == 0) {
 			return true;
 		}
-		if (l.pending <= l.tickets || l.tickets + s.helpers >= cap(s) || _idle.num_unparked() >= _n) {
+		if (l.pending <= l.tickets || l.tickets + l.helpers >= cap(s) || !spare(c)) {
 			return false;
 		}
 		if (l.tickets == 0) {
 			return true;  // a helper serves it; this is the ring's first
 		}
 		// relaxed: a counter for the ring's bound; the ticket itself is published under s.mu.
-		if (_extras.fetch_add(1, std::memory_order_relaxed) >= _n) {
-			_extras.fetch_sub(1, std::memory_order_relaxed);
+		if (_extras[c].fetch_add(1, std::memory_order_relaxed) >= _n) {
+			_extras[c].fetch_sub(1, std::memory_order_relaxed);
 			return false;
 		}
 		return true;
 	}
 
-	// Under s.mu: gives back one ring ticket.
-	void drop(GroupState& s) noexcept {
-		if (s.lane.tickets-- > 1) {
-			_extras.fetch_sub(1, std::memory_order_relaxed);
+	// Under s.mu: gives back one ring ticket of lane c.
+	void drop(GroupState& s, unsigned c) noexcept {
+		if (s.lanes[c].tickets-- > 1) {
+			_extras[c].fetch_sub(1, std::memory_order_relaxed);
 		}
 	}
 
 	// Under s.mu, after an item finished or a cancel: wakes wait() callers that may be done.
 	bool waiters_due(GroupState& s) noexcept {
-		if (s.waiters && s.lane.pending == 0 && s.running <= 1) {
+		if (s.waiters && s.pending() == 0 && s.running <= 1) {
 			// release: under s.mu anyway; the futex compares the word.
 			_group_wake.fetch_add(1, std::memory_order_release);
 			return true;
@@ -714,12 +769,12 @@ private:
 		return false;
 	}
 
-	void release(GroupState* s, bool push, bool extra, bool wake, bool free) noexcept {
+	void release(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
 		if (push) {
-			_ready.push(s);
+			_ready[c].push(s);
 		}
 		if (extra) {
-			_ready.push(s);
+			_ready[c].push(s);
 		}
 		if (push || extra) {
 			_idle.notify_one();
@@ -744,11 +799,11 @@ private:
 		here.item = prev_item;
 	}
 
-	// Under s.mu with a ticket held (a ring ticket, or a helper's): one turn of s, a
-	// quantum of service plus its debt, then requeue, keep, or drop the ticket. Returns
-	// with s.mu released.
-	void turn(GroupState& s, bool helper) noexcept {
-		Lane& l = s.lane;
+	// Under s.mu with a ticket of lane c held (a ring ticket, or a helper's): one turn, a
+	// quantum of service plus the lane's debt, then requeue, keep, or drop the ticket.
+	// Returns with s.mu released.
+	void turn(GroupState& s, unsigned c, bool helper) noexcept {
+		Lane& l = s.lanes[c];
 		std::int64_t budget = l.deficit + _quantum * s.weight;
 		l.deficit = 0;
 		bool wake = false;
@@ -773,57 +828,118 @@ private:
 		bool push = false;
 		bool extra = false;
 		if (helper) {
-			--s.helpers;
+			--l.helpers;
 		}
 		if (l.pending == 0) {
-			l.deficit = 0;  // DRR: an idle group keeps neither credit nor debt
+			l.deficit = 0;  // DRR: an idle lane keeps neither credit nor debt
 			if (!helper) {
-				drop(s);
+				drop(s, c);
 			}
 		} else {
 			if (budget < 0) {
 				l.deficit += budget;
 			}
 			if (helper) {
-				// A helper's ticket never joins the ring, unless the group would have none.
+				// A helper's ticket never joins the ring, unless the lane would have none.
 				if (l.tickets == 0) {
 					++l.tickets;
 					++l.listed;
 					push = true;
 				}
-			} else if (l.tickets > 1 && _ready.size() > l.listed) {
-				drop(s);  // other groups wait: an extra ticket goes back, so shares even out
+			} else if (l.tickets > 1 && _ready[c].size() > l.listed) {
+				drop(s, c);  // other groups wait: an extra ticket goes back, so shares even out
 			} else {
 				++l.listed;
 				push = true;
 				// One more per quantum while workers idle: an index alone fans out to every core.
-				if (grant(s)) {
+				if (grant(s, c)) {
 					++l.tickets;
 					++l.listed;
 					extra = true;
 				}
 			}
 		}
-		bool free = !s.owned && l.tickets == 0 && s.helpers == 0;
+		bool free = !s.owned && s.unreferenced();
 		s.mu.unlock();
-		release(&s, push, extra, wake, free);
+		release(&s, c, push, extra, wake, free);
 	}
 
-	// A ring entry: one listed ticket of s.
-	void serve(GroupState& s) noexcept {
+	// A ring entry of class c: one listed ticket of s.
+	void serve(GroupState& s, unsigned c) noexcept {
 		s.mu.lock();
-		--s.lane.listed;
-		turn(s, false);
+		--s.lanes[c].listed;
+		turn(s, c, false);
 	}
 
-	// Runs one queued item of the caller's own group inline; false when there is none.
+	// The next ring entry in class order. A flush or merge turn holds a background slot
+	// (released by done()): at most _bg_cap workers run them, so the reserve stays free
+	// for queries, and at most _merge_cap run merges.
+	GroupState* pick(unsigned& c) noexcept {
+		if (GroupState* s = _ready[query].pop()) {
+			c = query;
+			return s;
+		}
+		if (_ready[flush].size() == 0 && _ready[merge].size() == 0) {
+			return nullptr;
+		}
+		// relaxed: counters for the caps; the turn is ordered by the ring and the group lock.
+		if (_busy_bg.fetch_add(1, std::memory_order_relaxed) < _bg_cap) {
+			if (GroupState* s = _ready[flush].pop()) {
+				c = flush;
+				return s;
+			}
+			if (_ready[merge].size() != 0) {
+				if (_busy_merge.fetch_add(1, std::memory_order_relaxed) < _merge_cap) {
+					if (GroupState* s = _ready[merge].pop()) {
+						c = merge;
+						return s;
+					}
+				}
+				_busy_merge.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+		_busy_bg.fetch_sub(1, std::memory_order_relaxed);
+		return nullptr;
+	}
+
+	void done(unsigned c) noexcept {
+		if (c != query) {
+			_busy_bg.fetch_sub(1, std::memory_order_relaxed);
+			if (c == merge) {
+				_busy_merge.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	// The parker's final check: work this worker could take now. A slot held by another
+	// worker's pick() at this moment is released by a worker that then looks again.
+	bool ready_for_me() const noexcept {
+		if (!_ready[query].empty()) {
+			return true;
+		}
+		if (_busy_bg.load(std::memory_order_seq_cst) >= _bg_cap) {
+			return false;
+		}
+		if (!_ready[flush].empty()) {
+			return true;
+		}
+		return _busy_merge.load(std::memory_order_seq_cst) < _merge_cap && !_ready[merge].empty();
+	}
+
+	// Runs one queued item of the caller's own group inline, queries first; false when
+	// there is none.
 	bool help_own() noexcept {
 		GroupState* s = threadpool_detail::tls_here.state;
 		if (!s) {
 			return false;
 		}
 		s->mu.lock();
-		WorkItem* item = s->lane.pop();
+		WorkItem* item = nullptr;
+		for (auto& l : s->lanes) {
+			if ((item = l.pop())) {
+				break;
+			}
+		}
 		if (!item) {
 			s->mu.unlock();
 			return false;
@@ -842,6 +958,19 @@ private:
 		return true;
 	}
 
+	// On a worker: serves one turn of another group's queries; false when none waits.
+	bool help_query() noexcept {
+		if (!on_worker()) {
+			return false;
+		}
+		GroupState* s = _ready[query].pop();
+		if (!s) {
+			return false;
+		}
+		serve(*s, query);
+		return true;
+	}
+
 	// Parks worker idx after it found nothing; false once the pool is stopping.
 	bool park(unsigned idx, bool& searching) noexcept {
 		if (_stop.load(std::memory_order_acquire)) {
@@ -853,7 +982,7 @@ private:
 		// acquire: to_parked() took the mutex after the destructor's notify_all() did, or
 		// before it and is woken by it; either way a stop is not slept through.
 		bool stopping = _stop.load(std::memory_order_acquire);
-		if (stopping || (final_check && !_ready.empty())) {
+		if (stopping || (final_check && ready_for_me())) {
 			if (_idle.unpark_self(idx)) {
 				if (stopping) {
 					return false;
@@ -871,11 +1000,12 @@ private:
 		threadpool_detail::tls_here.pool = this;
 		bool searching = false;
 		for (;;) {
-			GroupState* s = _ready.pop();
+			unsigned c = flush;
+			GroupState* s = pick(c);
 			if (!s && !searching) {
 				searching = _idle.to_searching();
 				if (searching) {
-					s = _ready.pop();
+					s = pick(c);
 				}
 			}
 			if (s) {
@@ -885,7 +1015,8 @@ private:
 						_idle.notify_one();
 					}
 				}
-				serve(*s);
+				serve(*s, c);
+				done(c);
 				continue;
 			}
 			if (!park(idx, searching)) {
@@ -913,12 +1044,14 @@ public:
 
 	explicit WorkPool(Options options) :
 		_n(resolve(options.threads)),
+		_bg_cap(_n - (options.reserve < _n ? options.reserve : _n - 1)),
+		_merge_cap(options.merge_cap && options.merge_cap < _bg_cap ? options.merge_cap : _bg_cap),
 		_quantum(static_cast<std::int64_t>(double(options.quantum.count()) * threadpool_detail::ticks_per_ns())),
-		_idle(_n),
-		_ready(2 * (std::size_t(_n) + 1)) {
+		_idle(_n) {
 		if (_quantum < 1) {
 			_quantum = 1;
 		}
+		reserve_rings(1);
 		_workers.reserve(_n);
 		try {
 			for (unsigned idx = 0; idx < _n; ++idx) {
@@ -942,33 +1075,36 @@ public:
 
 	bool on_worker() const noexcept { return threadpool_detail::tls_here.pool == this; }
 
-	// Queues item on item.group (the pool's own group when null) from any thread; never
-	// blocks, never allocates.
+	// Queues item on item.group (the pool's own group when null) in item.cls, from any
+	// thread; never blocks, never allocates.
 	void post(WorkItem& item) noexcept {
 		GroupState& s = state_of(item);
+		unsigned c = threadpool_detail::class_of(item);
+		Lane& l = s.lanes[c];
 		s.mu.lock();
-		s.lane.push(&item);
-		bool push = grant(s);
+		l.push(&item);
+		bool push = grant(s, c);
 		if (push) {
-			++s.lane.tickets;
-			++s.lane.listed;
+			++l.tickets;
+			++l.listed;
 		}
 		bool wake = s.waiters != 0;
 		if (wake) {
 			_group_wake.fetch_add(1, std::memory_order_release);  // a waiting owner may help
 		}
 		s.mu.unlock();
-		release(&s, push, false, wake, false);
+		release(&s, c, push, false, wake, false);
 	}
 
-	// Runs the caller's own group's queued items (when called from one of its items) until
-	// pred() holds, so a nested wait never blocks a worker on work it could do itself.
-	// It never runs another group's items. With nothing to run it polls with backoff.
+	// Runs the caller's own group's queued items (when called from one of its items) and,
+	// on a worker, other groups' queries, until pred() holds, so a nested wait never
+	// blocks a worker on work it could do itself. It never runs another group's flush or
+	// merge items. With nothing to run it polls with backoff.
 	template <typename Pred>
 	void help_until(Pred&& pred) {
 		unsigned round = 0;
 		while (!pred()) {
-			if (help_own()) {
+			if (help_own() || help_query()) {
 				round = 0;
 			} else {
 				threadpool_detail::backoff(round);
@@ -983,9 +1119,9 @@ public:
 };
 
 
-// One owner's FIFO on a shared WorkPool: one per index. Groups take turns of `quantum *
-// weight` service; `width` caps how many of its items run at once (0: no cap). The pool
-// must outlive the group.
+// One owner's FIFOs on a shared WorkPool, one per WorkClass: one group per index. Groups
+// take turns of `quantum * weight` service per class; `width` caps how many of its items
+// of one class run at once (0: no cap). The pool must outlive the group.
 class WorkGroup {
 	friend WorkPool;
 	friend WorkItem;
@@ -1028,7 +1164,7 @@ public:
 		_s->weight = weight ? weight : 1;
 		auto states = pool._states.fetch_add(1, std::memory_order_relaxed) + 1;
 		try {
-			pool._ready.reserve(states + pool._n + 1);
+			pool.reserve_rings(states);
 		} catch (...) {
 			pool._states.fetch_sub(1, std::memory_order_relaxed);
 			delete _s;
@@ -1053,7 +1189,7 @@ public:
 		wait();
 		_s->mu.lock();
 		_s->owned = false;
-		bool free = _s->lane.tickets == 0 && _s->helpers == 0;
+		bool free = _s->unreferenced();
 		_s->mu.unlock();
 		if (free) {
 			delete _s;
@@ -1069,9 +1205,10 @@ public:
 	}
 
 	// Boxes func (callable as func() or func(const WorkItem&), whose stop_requested() is
-	// the group's stop) and posts it: one allocation. False when the box cannot be allocated.
+	// the group's stop) and posts it in class cls: one allocation. False when the box
+	// cannot be allocated.
 	template <typename Func>
-	bool enqueue(Func&& func) {
+	bool enqueue(Func&& func, WorkClass cls = WorkClass::flush) {
 		using F = std::decay_t<Func>;
 		static_assert(std::is_invocable_v<F&> || std::is_invocable_v<F&, const WorkItem&>, "a WorkGroup task takes no arguments or a const WorkItem&");
 		auto* box = new (std::nothrow) Box<F>(std::forward<Func>(func));
@@ -1080,20 +1217,29 @@ public:
 		}
 		box->run = &Box<F>::invoke;
 		box->destroy = &Box<F>::drop;
+		box->cls = cls;
 		box->flags = threadpool_detail::item_boxed;
 		post(*box);
 		return true;
 	}
 
 	// Unlinks the queued items that have not started and returns them as a list through
-	// `next`, oldest first, for the owner to free or recycle; running items see
-	// stop_requested() turn true. Items posted afterwards run normally.
+	// `next`, queries then flushes then merges, each oldest first, for the owner to free
+	// or recycle; running items see stop_requested() turn true. Items posted afterwards
+	// run normally.
 	WorkItem* cancel() noexcept {
+		WorkItem* list = nullptr;
+		WorkItem** tail = &list;
 		_s->mu.lock();
-		WorkItem* list = _s->lane.head;
-		_s->lane.head = nullptr;
-		_s->lane.tail = nullptr;
-		_s->lane.pending = 0;
+		for (auto& l : _s->lanes) {
+			if (l.head) {
+				*tail = l.head;
+				tail = &l.tail->next;
+			}
+			l.head = nullptr;
+			l.tail = nullptr;
+			l.pending = 0;
+		}
 		// relaxed: under mu; readers check it advisorily, and sleep's release orders it.
 		_s->epoch.fetch_add(1, std::memory_order_relaxed);
 		// release: a sleeper that sees the new word sees the new epoch.
@@ -1108,33 +1254,56 @@ public:
 	}
 
 	// Blocks until the group has nothing queued and nothing running but the caller (when
-	// called from one of its items). On a worker it serves the group meanwhile, so a wait
-	// cannot deadlock on queued work; off the pool it parks.
+	// called from one of its items). On a worker it serves the group meanwhile, and other
+	// groups' queries, so a wait cannot deadlock on queued work; off the pool it parks.
 	void wait() noexcept {
 		auto& pool = *_pool;
 		GroupState* s = _s;
 		bool own = threadpool_detail::tls_here.state == s;
+		bool worker = pool.on_worker();
 		std::uint32_t self = own ? 1 : 0;
+		// Under s->mu: the lane a waiting worker may serve, or -1. From the group's own item
+		// it runs any queued item inline; otherwise it serves as a helper within the width.
+		auto helpable = [&]() -> int {
+			if (!worker) {
+				return -1;
+			}
+			for (unsigned c = 0; c < threadpool_detail::classes; ++c) {
+				auto& l = s->lanes[c];
+				if (l.pending && (own || !s->width || l.tickets + l.helpers < s->width)) {
+					return static_cast<int>(c);
+				}
+			}
+			return -1;
+		};
 		for (;;) {
 			// acquire: pairs with waiters_due()'s increment, made under s->mu.
 			auto word = pool._group_wake.load(std::memory_order_acquire);
 			s->mu.lock();
-			if (s->lane.pending == 0 && s->running == self) {
+			if (s->pending() == 0 && s->running == self) {
 				s->mu.unlock();
 				return;
 			}
-			if (s->lane.pending && pool.on_worker()) {
+			if (int c = helpable(); c >= 0) {
 				if (own) {
 					s->mu.unlock();
 					pool.help_own();
-					continue;
+				} else {
+					++s->lanes[c].helpers;
+					pool.turn(*s, static_cast<unsigned>(c), true);
 				}
-				// A worker waiting on another group serves it as a helper, within its width.
-				if (!s->width || s->lane.tickets + s->helpers < s->width) {
-					++s->helpers;
-					pool.turn(*s, true);
-					continue;
-				}
+				continue;
+			}
+			s->mu.unlock();
+			if (worker && pool.help_query()) {
+				continue;
+			}
+			s->mu.lock();
+			// Checked again where the waiter registers: a group that went quiet, or work
+			// that came in, since the first look is not slept through.
+			if ((s->pending() == 0 && s->running == self) || helpable() >= 0) {
+				s->mu.unlock();
+				continue;
 			}
 			++s->waiters;
 			s->mu.unlock();

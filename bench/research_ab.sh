@@ -15,7 +15,7 @@ p = sys.argv[1]
 s = open(p).read()
 s = s.replace("struct Task {\n", "struct Task {\n\tWorkItem wi;  // first: WorkPoolAdapter's trampoline casts back\n", 1)
 s = s.replace("inline std::unique_ptr<Pool> make_pool(", "}  // namespace research\n#include \"work_pool_research.hh\"\nnamespace research {\n\ninline std::unique_ptr<Pool> make_pool(", 1)
-s = s.replace("\tif (name == \"baseline\")", "\tif (name == \"workpool\") { return make_work_pool(n); }\n\tif (name == \"baseline\")", 1)
+s = s.replace("\tif (name == \"baseline\")", "\tif (name.rfind(\"workpool\", 0) == 0) { return make_work_pool(name, n); }\n\tif (name == \"baseline\")", 1)
 s = s.replace("#include \"threadpool.hh\"\n", "#include \"threadpool.hh\"\n#include \"work_pool.hh\"\n", 1)
 open(p, "w").write(s)
 PY

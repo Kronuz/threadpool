@@ -5,7 +5,7 @@
   and the corrections at its top (read at `150152c`). Reviews: none yet.
 - Branch / worktree: `feature/scheduler` at `~/code/Kronuz/threadpool-wt/scheduler`, from
   `origin/main` at `628679a`.
-- State: implementing (R1 and R2 in; R3 next)
+- State: implementing (R1, R2, R3 in; K3 A/B, then K4, K6, K7)
 - Done criteria (set by the lead; contributors tick, never edit):
   - [ ] K1. R1 is in. Idle workers use no measurable CPU. Tiny-task throughput is at least
     today's pool and at least the research prototype's, within noise (interleaved A/B, five
@@ -37,8 +37,8 @@
     cpp-libraries index for consumers). Detent links these libraries: nothing it calls
     changes behavior.
   - [ ] K5. TSan and ASan+UBSan clean. CI green on all jobs.
-    R1: CI run 39134047236 green on all 8 jobs. R2: TSan (3 runs) and ASan+UBSan (2) clean
-    locally, Homebrew LLVM.
+    R1: CI run 39134047236 green on all 8 jobs. R2: run 39135478119 green on all 8. R3: TSan
+    (3 runs) and ASan+UBSan (2) clean locally, Homebrew LLVM.
   - [ ] K6. FreeBSD: no kernel-time regression against today's pool. A condvar handoff
     cost about 3x kernel time on FreeBSD 14.4 in strata, so measure CPU and sys time there.
   - [ ] K7. The README and notes document the new API in the repo's style. Comments stay
@@ -48,16 +48,20 @@
     (`futex(2)`, `os_sync_wait_on_address` or `__ulock`, `_umtx_op`), untimed; Tokio's idle
     protocol; `help_until`; `test/work_pool.cc`; `bench/research_ab.sh` and
     `bench/work_pool_research.hh` (the research harness with WorkPool added).
-  - R2 (this commit): `WorkGroup`, per-group lanes, the chained ready ring, deficit round
+  - R2 (`75cdf1d`): `WorkGroup`, per-group lanes, the chained ready ring, deficit round
     robin over cycle-counter time, tickets, `cancel()` returning the queue, narrow helping,
     `sleep_until`; `test/work_group.cc` (11 cases).
-- Doing: R3, the classes, the reserve, the merge cap.
+  - R3 (this commit): `WorkClass` (query, flush, merge), a lane and a ring per class, picked
+    in that order; `Options::reserve` (default 1) and `merge_cap` (default threads -
+    reserve) held as exact slots; waiting workers also serve other groups' queries;
+    `enqueue(f, cls)`; tests 12 to 15; `bench/kernel_time.cc` (K6, off by default).
+- Doing: K3's tail A/B against the prototypes.
 - Next:
-  1. Push R2 once R1's CI is green (it is), dispatch CI.
-  2. R3; K3 against the note's 5.2 tables.
-  3. K4: build scheduler, logger, http-log, prism, strata, and Xapiand against the branch.
-  4. K6 on strata's FreeBSD VM (`~/code/Kronuz/strata/tools/vm/freebsd.sh`).
-  5. K7: README, docs/API.md, ARCHITECTURE.md, AGENTS.md.
+  1. K3 against the note's 5.2 tables; K1's final tiny matrix and K2 again with the default
+     reserve.
+  2. K4: build scheduler, logger, http-log, prism, strata, and Xapiand against the branch.
+  3. K6 on strata's FreeBSD VM (`~/code/Kronuz/strata/tools/vm/freebsd.sh`).
+  4. K7: README, docs/API.md, ARCHITECTURE.md, AGENTS.md.
 - Blocked on: nothing.
 - Decisions to confirm (architect), each a reading of the note:
   1. Extra tickets are capped pool-wide at one per worker and retired at a turn's end when
@@ -77,7 +81,17 @@
      `wait()` and the destructor never wait a ring round for a stale ticket.
   5. The destructor cancels: queued boxed items (`enqueue`) are freed unrun; caller-owned
      items are unlinked and left to the owner, who calls `cancel()` first to get them back.
+  6. The default `reserve = 1` (correction 7) keeps one worker off flush and merge work,
+     so one flush-only index gets threads - 1 workers, not K2's "whole pool"; `reserve = 0`
+     gives it all (test 1). Which default should hold, or should the reserve engage only
+     while queries arrive? (A question for the lead and the owner, not decided here.)
+  7. `width` caps each class separately: a group's query, flush, and merge lanes each hold
+     up to `width` workers.
 - Findings folded in: none.
+- Host rule slip (for the lead): at about 07:21 to 07:25 I built and ran the TSan and ASan
+  suites while `si-m2c` (strict, the small-indexes M2 rerun, 07:19 to 07:34) held the host;
+  my command printed `quiet check`'s 1 without gating on it. That run may need a redo.
+  Every compile and test command now exits on 1.
 - Consumers (for K4): `scheduler` (and through it `logger`, `http-log`, `prism`, Xapiand),
   `strata`; reactor does not link threadpool (it runs its own `asio::thread_pool`).
 - Last verified: 2026-10-18 07:30, Mac: all five CTest targets under Apple clang, TSan,

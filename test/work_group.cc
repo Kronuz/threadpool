@@ -1,7 +1,7 @@
 // Tests for WorkGroup on a WorkPool: one group alone fans out to every worker, groups take
 // turns, width caps, weight shares, cancel hands back the queue, wait helps instead of
-// blocking, the destructor (also from the group's own item), sleep_until, and thousands of
-// groups opening while others post.
+// blocking, the destructor (also from the group's own item), sleep_until, thousands of
+// groups opening while others post, and the classes: the reserve, their order, merge_cap.
 //
 // Build: c++ -std=c++20 -I.. work_group.cc ../thread.cc -o work_group && ./work_group
 #include <atomic>
@@ -38,27 +38,24 @@ void spin_until(Pred&& pred) {
 }  // namespace
 
 int main() {
-	// ---- 1. One group alone takes every worker. ----
+	// ---- 1. One group alone takes every worker at once (no reserve). ----
 	{
-		WorkPool pool({.threads = 4});
+		WorkPool pool({.threads = 4, .reserve = 0});
 		WorkGroup group(pool);
-		std::mutex mu;
-		std::set<std::thread::id> threads;
-		std::atomic<int> done{0};
+		std::atomic<unsigned> now{0};
+		std::atomic<unsigned> peak{0};
 		for (int i = 0; i < 64; ++i) {
 			group.enqueue([&] {
-				burn(5ms);
-				{
-					std::lock_guard<std::mutex> lk(mu);
-					threads.insert(std::this_thread::get_id());
+				auto n = now.fetch_add(1) + 1;
+				for (auto p = peak.load(); n > p && !peak.compare_exchange_weak(p, n);) {
 				}
-				done.fetch_add(1);
+				burn(5ms);
+				now.fetch_sub(1);
 			});
 		}
 		group.wait();
-		assert(done.load() == 64);
-		assert(threads.size() == 4);
-		std::printf("work_group OK: one group alone ran on all %zu workers\n", threads.size());
+		assert(peak.load() == 4);
+		std::printf("work_group OK: one group alone ran on all %u workers at once\n", peak.load());
 	}
 
 	// ---- 2. Groups take turns: a late group's item waits for one turn, not the backlog. ----
@@ -306,6 +303,136 @@ int main() {
 		}
 		assert(ran.load() == 4 * 2500 * 4);
 		std::printf("work_group OK: 10000 groups opened under load ran all %llu items\n", static_cast<unsigned long long>(ran.load()));
+	}
+
+	// ---- 12. The reserve: flushes hold threads - reserve workers; a query runs beside them. ----
+	{
+		WorkPool pool({.threads = 4, .reserve = 1});
+		WorkGroup flushes(pool);
+		WorkGroup queries(pool);
+		std::atomic<unsigned> now{0};
+		std::atomic<unsigned> peak{0};
+		std::atomic<unsigned> beside{0};
+		for (int i = 0; i < 12; ++i) {
+			flushes.enqueue([&] {
+				auto n = now.fetch_add(1) + 1;
+				for (auto p = peak.load(); n > p && !peak.compare_exchange_weak(p, n);) {
+				}
+				burn(20ms);
+				now.fetch_sub(1);
+			});
+		}
+		spin_until([&] { return now.load() == 3; });
+		queries.enqueue([&] { beside = now.load(); }, WorkClass::query);
+		queries.wait();
+		flushes.wait();
+		assert(peak.load() == 3);
+		assert(beside.load() == 3);
+		std::printf("work_group OK: flushes held 3 of 4 workers; a query ran beside all 3\n");
+	}
+
+	// ---- 13. Class order: queries, then flushes, then merges. ----
+	{
+		WorkPool pool({.threads = 1});
+		WorkGroup blocker(pool);
+		WorkGroup q(pool);
+		WorkGroup f(pool);
+		WorkGroup m(pool);
+		std::promise<void> started;
+		std::promise<void> release;
+		auto started_future = started.get_future();
+		auto release_future = release.get_future().share();
+		std::mutex mu;
+		std::vector<char> order;
+		auto record = [&](char c) {
+			std::lock_guard<std::mutex> lk(mu);
+			order.push_back(c);
+		};
+		blocker.enqueue([&] {
+			started.set_value();
+			release_future.wait();
+		});
+		started_future.wait();
+		for (int i = 0; i < 3; ++i) {
+			m.enqueue([&] { record('m'); }, WorkClass::merge);
+			f.enqueue([&] { record('f'); }, WorkClass::flush);
+			q.enqueue([&] { record('q'); }, WorkClass::query);
+		}
+		release.set_value();
+		m.wait();
+		f.wait();
+		q.wait();
+		blocker.wait();
+		assert((order == std::vector<char>{'q', 'q', 'q', 'f', 'f', 'f', 'm', 'm', 'm'}));
+		std::printf("work_group OK: queries ran before flushes, flushes before merges\n");
+	}
+
+	// ---- 14. merge_cap: merges hold at most that many workers; flushes run beside them. ----
+	{
+		WorkPool pool({.threads = 4, .reserve = 0, .merge_cap = 1});
+		std::vector<std::unique_ptr<WorkGroup>> merges;
+		WorkGroup flushes(pool);
+		std::atomic<unsigned> now{0};
+		std::atomic<unsigned> peak{0};
+		std::atomic<int> flushed{0};
+		for (int g = 0; g < 4; ++g) {
+			merges.push_back(std::make_unique<WorkGroup>(pool));
+			for (int i = 0; i < 3; ++i) {
+				merges.back()->enqueue([&] {
+					auto n = now.fetch_add(1) + 1;
+					for (auto p = peak.load(); n > p && !peak.compare_exchange_weak(p, n);) {
+					}
+					burn(2ms);
+					now.fetch_sub(1);
+				}, WorkClass::merge);
+			}
+		}
+		for (int i = 0; i < 20; ++i) {
+			flushes.enqueue([&] { flushed.fetch_add(1); });
+		}
+		flushes.wait();
+		for (auto& g : merges) {
+			g->wait();
+		}
+		assert(peak.load() == 1);
+		assert(flushed.load() == 20);
+		std::printf("work_group OK: merge_cap 1 held merges to one worker while flushes ran\n");
+	}
+
+	// ---- 15. cancel() across classes: queries, then flushes, then merges. ----
+	{
+		WorkPool pool({.threads = 1});
+		WorkGroup blocker(pool);
+		WorkGroup group(pool);
+		std::promise<void> started;
+		std::promise<void> release;
+		auto started_future = started.get_future();
+		auto release_future = release.get_future().share();
+		blocker.enqueue([&] {
+			started.set_value();
+			release_future.wait();
+		});
+		started_future.wait();
+		struct Tagged : WorkItem {
+			char tag;
+		};
+		Tagged items[3];
+		const WorkClass classes[3] = {WorkClass::merge, WorkClass::flush, WorkClass::query};
+		const char tags[3] = {'m', 'f', 'q'};
+		for (int i = 0; i < 3; ++i) {
+			items[i].tag = tags[i];
+			items[i].cls = classes[i];
+			items[i].run = [](WorkItem*) noexcept {};
+			group.post(items[i]);
+		}
+		std::vector<char> got;
+		for (WorkItem* item = group.cancel(); item; item = item->next) {
+			got.push_back(static_cast<Tagged*>(item)->tag);
+		}
+		release.set_value();
+		blocker.wait();
+		assert((got == std::vector<char>{'q', 'f', 'm'}));
+		std::printf("work_group OK: cancel() handed back queries, flushes, then merges\n");
 	}
 
 	std::printf("all work_group tests passed\n");
