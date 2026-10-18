@@ -186,10 +186,11 @@ public:
 class StealPool final : public ThreadedPool {
 public:
 	struct Options {
-		bool lifo = true;
+		bool lifo = true;          // the LIFO slot (at most 3 polls in a row)
 		bool steal_half = true;
 		unsigned spin_us = 0;
-		unsigned inject_interval = 61;
+		unsigned inject_interval = 61;  // ticks between inject checks, or 200 µs of task time
+		bool owner_lifo = false;   // the owner pops its deque LIFO (Tokio) or FIFO (Go's runq)
 	};
 
 private:
@@ -198,12 +199,25 @@ private:
 		Task* lifo = nullptr;
 		unsigned lifo_polls = 0;
 		unsigned tick = 0;
+		unsigned inject_tick = 0;
+		std::uint64_t inject_time = 0;
 		std::uint64_t rng = 0;
 	};
+
+	// The owner's take: FIFO costs one CAS per pop but keeps a self-reposting task from
+	// holding its worker; LIFO is Tokio's.
+	Task* take_own(Worker& w) {
+		if (_opt.owner_lifo) { return w.deque.pop(); }
+		for (int attempt = 0; attempt < 4 && !w.deque.empty(); ++attempt) {
+			if (Task* t = w.deque.pop_front()) { return t; }
+		}
+		return nullptr;
+	}
 	std::vector<std::unique_ptr<Worker>> _workers;
 	Mpmc<Task, 1 << 17> _inject;
 	Options _opt;
 	std::string _name;
+	std::uint64_t _inject_cycles;  // 200 µs of task time, in cycle-counter ticks
 
 	void inject_push(Task* t) {
 		while (!_inject.push(t)) { std::this_thread::yield(); }
@@ -251,8 +265,10 @@ private:
 	}
 
 public:
-	StealPool(unsigned n, Options opt = {}) : ThreadedPool(n, opt.spin_us), _opt(opt) {
-		_name = std::string("steal") + (opt.lifo ? "" : "-nolifo") + (opt.steal_half ? "" : "-one") + (opt.spin_us ? "-spin" : "");
+	explicit StealPool(unsigned n) : StealPool(n, Options{}) {}
+	StealPool(unsigned n, Options opt) : ThreadedPool(n, opt.spin_us), _opt(opt) {
+		_inject_cycles = static_cast<std::uint64_t>(200'000.0 * cycles_per_ns());
+		_name = std::string("steal") + (opt.lifo ? "" : "-noslot") + (opt.owner_lifo ? "-lifo" : "") + (opt.steal_half ? "" : "-one") + (opt.spin_us ? "-spin" : "");
 		_workers.reserve(n);
 		for (unsigned i = 0; i < n; ++i) {
 			_workers.emplace_back(std::make_unique<Worker>());
@@ -290,7 +306,19 @@ public:
 		bool searching = false;
 		for (;;) {
 			Task* t = nullptr;
-			if (++w.tick % _opt.inject_interval == 0) { t = _inject.pop(); }
+			// The inject queue gets a turn every inject_interval tasks, or every 200 µs of
+			// task time (the cycle counter, read per task), whichever comes first.
+			++w.tick;
+			bool inject_turn = w.tick - w.inject_tick >= _opt.inject_interval;
+			if (!inject_turn) {
+				auto c = cycles();
+				inject_turn = c - w.inject_time >= _inject_cycles;
+				if (inject_turn) { w.inject_time = c; }
+			}
+			if (inject_turn) {
+				w.inject_tick = w.tick;
+				t = _inject.pop();
+			}
 			if (!t && w.lifo && w.lifo_polls < 3) {
 				t = w.lifo;
 				w.lifo = nullptr;
@@ -298,7 +326,7 @@ public:
 			}
 			if (!t) {
 				w.lifo_polls = 0;
-				t = w.deque.pop();
+				t = take_own(w);
 				if (!t && w.lifo) { t = w.lifo; w.lifo = nullptr; }
 			}
 			if (!t) { t = _inject.pop(); }
@@ -384,6 +412,9 @@ protected:
 
 	unsigned cap(const G& g) const noexcept { return g.width ? g.width : _n; }
 
+	// Whether an idle worker could take one more ticket of class c.
+	virtual bool spare_capacity(unsigned) const noexcept { return _idle.num_unparked() < _n; }
+
 	bool any_ready() {
 		for (auto& r : _ready) { if (!r.list.empty()) { return true; } }
 		return false;
@@ -416,7 +447,7 @@ protected:
 		// idle workers and more work than tickets, one more ticket: an index alone fans out
 		// to every core (doubling per quantum), busy indexes beside each other keep one.
 		bool requeue = f.pending > 0;
-		bool fan_out = requeue && f.pending > f.tickets && f.tickets < cap(*g) && _idle.num_unparked() < _n;
+		bool fan_out = requeue && f.pending > f.tickets && f.tickets < cap(*g) && spare_capacity(c);
 		if (!requeue) { --f.tickets; }
 		if (fan_out) { ++f.tickets; }
 		g->mu.unlock();
@@ -436,7 +467,9 @@ protected:
 	}
 
 public:
-	GroupPool(unsigned n, Options opt = {}, const char* nm = "groups") : ThreadedPool(n, opt.spin_us), _opt(opt), _name(nm) {
+	explicit GroupPool(unsigned n) : GroupPool(n, Options{}, "groups") {}
+	GroupPool(unsigned n, Options opt, const char* nm = "groups") : ThreadedPool(n, opt.spin_us), _opt(opt), _name(nm) {
+		if (opt.quantum_ns != 100'000) { _name += "-q" + std::to_string(opt.quantum_ns / 1000) + "us"; }
 		if (opt.spin_us) { _name += "-spin"; }
 	}
 	~GroupPool() override { stop(); }
@@ -456,7 +489,7 @@ public:
 		g->mu.lock();
 		f.push(t);
 		// The first ticket always; more only while workers are idle (see serve()).
-		if (f.tickets == 0 || (f.tickets < cap(*g) && f.tickets < f.pending && _idle.num_unparked() < _n)) {
+		if (f.tickets == 0 || (f.tickets < cap(*g) && f.tickets < f.pending && spare_capacity(c))) {
 			++f.tickets;
 			ticket = true;
 		}
@@ -488,7 +521,7 @@ public:
 	}
 };
 
-inline std::unique_ptr<GroupPool> make_group_pool(unsigned n, GroupPool::Options opt = {}) {
+inline std::unique_ptr<GroupPool> make_group_pool(unsigned n, GroupPool::Options opt = GroupPool::Options{}) {
 	auto p = std::make_unique<GroupPool>(n, opt);
 	p->begin();
 	return p;
@@ -506,6 +539,14 @@ class PrioPool final : public GroupPool {
 	alignas(64) std::atomic<unsigned> _busy_merge{0};
 	std::string _nm;
 
+	// Background classes fan out only onto workers beyond the reserve.
+	bool spare_capacity(unsigned c) const noexcept override {
+		auto unparked = _idle.num_unparked();
+		if (c == PRIO_QUERY) { return unparked < _n; }
+		if (c == PRIO_MERGE && _busy_merge.load(std::memory_order_relaxed) >= _merge_cap) { return false; }
+		return unparked < _n - _reserve && _busy_bg.load(std::memory_order_relaxed) < _n - _reserve;
+	}
+
 	G* pick(unsigned& c) override {
 		if (G* g = _ready[PRIO_QUERY].list.pop()) { c = PRIO_QUERY; return g; }
 		if (_busy_bg.load(std::memory_order_relaxed) >= _n - _reserve) { return nullptr; }
@@ -517,7 +558,7 @@ class PrioPool final : public GroupPool {
 
 public:
 	// reserve: workers kept free of background work; merge_cap: workers merges may hold.
-	PrioPool(unsigned n, unsigned reserve, unsigned merge_cap, Options opt = {}) : GroupPool(n, opt, "prio"), _reserve(reserve < n ? reserve : n - 1), _merge_cap(merge_cap ? merge_cap : n) {
+	PrioPool(unsigned n, unsigned reserve, unsigned merge_cap, Options opt) : GroupPool(n, opt, "prio"), _reserve(reserve < n ? reserve : n - 1), _merge_cap(merge_cap ? merge_cap : n) {
 		_nm = "prio-r" + std::to_string(_reserve) + "-m" + std::to_string(_merge_cap);
 		if (opt.spin_us) { _nm += "-spin"; }
 	}
@@ -565,7 +606,7 @@ public:
 	}
 };
 
-inline std::unique_ptr<PrioPool> make_prio_pool(unsigned n, unsigned reserve, unsigned merge_cap, GroupPool::Options opt = {}) {
+inline std::unique_ptr<PrioPool> make_prio_pool(unsigned n, unsigned reserve, unsigned merge_cap, GroupPool::Options opt = GroupPool::Options{}) {
 	auto p = std::make_unique<PrioPool>(n, reserve, merge_cap, opt);
 	p->begin_prio();
 	return p;
@@ -631,7 +672,8 @@ private:
 	}
 
 public:
-	HomePool(unsigned n, Options opt = {}) : ThreadedPool(n, opt.spin_us), _opt(opt) {
+	explicit HomePool(unsigned n) : HomePool(n, Options{}) {}
+	HomePool(unsigned n, Options opt) : ThreadedPool(n, opt.spin_us), _opt(opt) {
 		_name = std::string("home") + (opt.rehome ? "" : "-fixed") + (opt.spin_us ? "-spin" : "");
 		_workers.reserve(n);
 		for (unsigned i = 0; i < n; ++i) {
@@ -742,9 +784,10 @@ inline std::unique_ptr<Pool> make_pool(const std::string& name, unsigned n) {
 	if (name == "baseline") { return std::make_unique<BaselinePool>(n); }
 	if (name == "raw") { return std::make_unique<RawPool>(n); }
 	if (name == "steal") { return std::make_unique<StealPool>(n); }
-	if (name == "steal-nolifo") { return std::make_unique<StealPool>(n, StealPool::Options{false, true, 0, 61}); }
-	if (name == "steal-one") { return std::make_unique<StealPool>(n, StealPool::Options{true, false, 0, 61}); }
-	if (name == "steal-spin") { return std::make_unique<StealPool>(n, StealPool::Options{true, true, 50, 61}); }
+	if (name == "steal-noslot") { return std::make_unique<StealPool>(n, StealPool::Options{false, true, 0, 61, false}); }
+	if (name == "steal-lifo") { return std::make_unique<StealPool>(n, StealPool::Options{true, true, 0, 61, true}); }
+	if (name == "steal-one") { return std::make_unique<StealPool>(n, StealPool::Options{true, false, 0, 61, false}); }
+	if (name == "steal-spin") { return std::make_unique<StealPool>(n, StealPool::Options{true, true, 50, 61, false}); }
 	if (name == "groups") { return make_group_pool(n); }
 	if (name == "groups-spin") { return make_group_pool(n, GroupPool::Options{100'000, 50}); }
 	if (name == "groups-q1ms") { return make_group_pool(n, GroupPool::Options{1'000'000, 0}); }

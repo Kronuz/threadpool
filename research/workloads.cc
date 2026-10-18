@@ -168,14 +168,16 @@ void tiny(const Args& a, Pool& pool) {
 			jobs[i].reposts_left = per_chain - 1;
 		}
 		latch.add(chains);
+		auto c0 = cpu_time_ns();
 		auto t0 = now_ns();
 		for (auto& j : jobs) { pool.post(&j); }
 		latch.wait();
 		auto t1 = now_ns();
+		auto c1 = cpu_time_ns();
 		const double total = double(per_chain) * chains;
 		std::printf("tiny pool=%-14s groups=%-6u producers=0 work_ns=%-5llu tasks=%.0f wall=%.3fs rate=%.2fM/s ns_per_task=%.1f cpu_ns_per_task=%.1f\n",
 			pool.name(), a.groups, static_cast<unsigned long long>(a.work_ns), total, double(t1 - t0) / 1e9, total / double(t1 - t0) * 1e3,
-			double(t1 - t0) / total, double(t1 - t0) * pool.workers() / total);
+			double(t1 - t0) / total, double(c1 - c0) / total);
 		return;
 	}
 	std::vector<Job> jobs(a.tasks);
@@ -188,6 +190,7 @@ void tiny(const Args& a, Pool& pool) {
 	latch.add(static_cast<std::uint32_t>(a.tasks));
 	std::vector<std::thread> producers;
 	const std::uint64_t per = a.tasks / a.producers;
+	auto c0 = cpu_time_ns();
 	auto t0 = now_ns();
 	for (unsigned p = 0; p < a.producers; ++p) {
 		producers.emplace_back([&, p] {
@@ -199,10 +202,11 @@ void tiny(const Args& a, Pool& pool) {
 	auto t_posted = now_ns();
 	latch.wait();
 	auto t1 = now_ns();
+	auto c1 = cpu_time_ns();
 	std::printf("tiny pool=%-14s groups=%-6u producers=%u work_ns=%-5llu tasks=%llu wall=%.3fs rate=%.2fM/s ns_per_task=%.1f post_ns=%.1f cpu_ns_per_task=%.1f\n",
 		pool.name(), a.groups, a.producers, static_cast<unsigned long long>(a.work_ns), static_cast<unsigned long long>(a.tasks), double(t1 - t0) / 1e9,
 		double(a.tasks) / double(t1 - t0) * 1e3, double(t1 - t0) / double(a.tasks), double(t_posted - t0) * a.producers / double(a.tasks),
-		double(t1 - t0) * pool.workers() / double(a.tasks));
+		double(c1 - c0) / double(a.tasks));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -352,13 +356,15 @@ void makespan(const Args& a, Pool& pool) {
 	auto t1 = now_ns();
 	auto during = bg.completed() - before;
 	bg.stop();
-	// Fair share: the probe is one of groups+1 busy groups sharing `workers` cores.
+	// Fair share: the probe is one of busy+1 groups, so it is owed 1/(busy+1) of the tasks the
+	// pool completed meanwhile (measured, so other load on the host cancels out). share = 1 is
+	// exactly its share; the nominal ideal assumes every worker is a whole core.
 	unsigned busy = (a.busy ? a.busy : a.groups) + 1;
-	const double share = double(pool.workers()) / double(busy);
-	const double ideal_beside = double(a.flush_tasks) * a.flush_ms * 1e6 / std::min<double>(share, double(std::min<unsigned>(pool.workers(), a.flush_tasks)));
-	std::printf("makespan pool=%-14s groups=%-6u flush=%ux%ums alone=%s (ideal %s) beside=%s (fair-share ideal %s, x%.2f) bg_tasks_per_s_during=%.0f fairness=%.3f\n",
+	const double share = double(a.flush_tasks) / double(during + a.flush_tasks) * double(busy);
+	const double ideal_beside = double(a.flush_tasks) * a.flush_ms * 1e6 / std::min<double>(double(pool.workers()) / double(busy), double(std::min<unsigned>(pool.workers(), a.flush_tasks)));
+	std::printf("makespan pool=%-14s groups=%-6u flush=%ux%ums alone=%s (ideal %s) beside=%s (nominal fair-share %s, x%.2f) share=%.2f bg_tasks_per_s_during=%.0f fairness=%.3f\n",
 		pool.name(), a.groups, a.flush_tasks, a.flush_ms, fmt_ns(alone[alone.size() / 2]).c_str(), fmt_ns(static_cast<std::uint64_t>(ideal_alone)).c_str(),
-		fmt_ns(beside).c_str(), fmt_ns(static_cast<std::uint64_t>(ideal_beside)).c_str(), double(beside) / ideal_beside,
+		fmt_ns(beside).c_str(), fmt_ns(static_cast<std::uint64_t>(ideal_beside)).c_str(), double(beside) / ideal_beside, share,
 		double(during) / (double(t1 - t0) / 1e9), bg.fairness(a.outstanding));
 }
 

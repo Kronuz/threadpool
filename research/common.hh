@@ -28,6 +28,22 @@ inline std::uint64_t now_ns() noexcept {
 		std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// The cycle counter: a few ns, for per-task time checks where the clock's 47 ns matter.
+inline std::uint64_t cycles() noexcept {
+#if defined(__x86_64__)
+	unsigned lo, hi;
+	__asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+	return (std::uint64_t(hi) << 32) | lo;
+#elif defined(__aarch64__)
+	std::uint64_t v;
+	__asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
+	return v;
+#else
+	return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
+
 inline void cpu_relax() noexcept {
 #if defined(__x86_64__) || defined(__i386__)
 	__asm__ __volatile__("pause" ::: "memory");
@@ -75,6 +91,19 @@ inline void burn_ns_clock(std::uint64_t ns) noexcept {
 	while (now_ns() < end) {
 		sink.fetch_add(churn(64), std::memory_order_relaxed);
 	}
+}
+
+// Cycle-counter ticks per nanosecond, calibrated once (5 ms).
+inline double cycles_per_ns() {
+	static double rate = [] {
+		auto c0 = cycles();
+		auto t0 = now_ns();
+		burn_ns_clock(5'000'000);
+		auto c1 = cycles();
+		auto t1 = now_ns();
+		return double(c1 - c0) / double(t1 - t0);
+	}();
+	return rate;
 }
 
 struct Percentiles {
