@@ -1,0 +1,16 @@
+workloads: makespan threads=16 trials=3 pools=baseline,steal,groups,prio,home,
+makespan pool=baseline       groups=1000   flush=64x1ms alone=5086.7 us (ideal 4000.0 us) beside=276.54 ms (nominal fair-share 4004.00 ms, x0.07) share=15.61 bg_tasks_per_s_during=14606 fairness=0.990
+makespan pool=steal          groups=1000   flush=64x1ms alone=5037.4 us (ideal 4000.0 us) beside=5337.1 us (nominal fair-share 4004.00 ms, x0.00) share=781.27 bg_tasks_per_s_during=3372 fairness=0.958
+makespan pool=groups         groups=1000   flush=64x1ms alone=4268.0 us (ideal 4000.0 us) beside=5471.95 ms (nominal fair-share 4004.00 ms, x1.37) share=0.79 bg_tasks_per_s_during=14731 fairness=0.998
+makespan pool=prio-r1-m15    groups=1000   flush=64x1ms alone=5106.2 us (ideal 4000.0 us) beside=5542.00 ms (nominal fair-share 4004.00 ms, x1.38) share=0.82 bg_tasks_per_s_during=14012 fairness=0.998
+makespan pool=home           groups=1000   flush=64x1ms alone=5031.2 us (ideal 4000.0 us) beside=137.55 ms (nominal fair-share 4004.00 ms, x0.03) share=31.45 bg_tasks_per_s_during=14344 fairness=0.995
+makespan pool=baseline       groups=1000   flush=64x1ms alone=4828.7 us (ideal 4000.0 us) beside=296.95 ms (nominal fair-share 4004.00 ms, x0.07) share=15.51 bg_tasks_per_s_during=13692 fairness=0.994
+makespan pool=steal          groups=1000   flush=64x1ms alone=4920.3 us (ideal 4000.0 us) beside=5511.1 us (nominal fair-share 4004.00 ms, x0.00) share=781.27 bg_tasks_per_s_during=3266 fairness=0.959
+makespan pool=groups         groups=1000   flush=64x1ms alone=5055.5 us (ideal 4000.0 us) beside=5419.31 ms (nominal fair-share 4004.00 ms, x1.35) share=0.82 bg_tasks_per_s_during=14377 fairness=0.998
+makespan pool=prio-r1-m15    groups=1000   flush=64x1ms alone=5102.7 us (ideal 4000.0 us) beside=5328.41 ms (nominal fair-share 4004.00 ms, x1.33) share=0.84 bg_tasks_per_s_during=14261 fairness=0.999
+makespan pool=home           groups=1000   flush=64x1ms alone=5032.1 us (ideal 4000.0 us) beside=133.59 ms (nominal fair-share 4004.00 ms, x0.03) share=31.67 bg_tasks_per_s_during=14665 fairness=0.995
+makespan pool=baseline       groups=1000   flush=64x1ms alone=5058.2 us (ideal 4000.0 us) beside=272.10 ms (nominal fair-share 4004.00 ms, x0.07) share=15.66 bg_tasks_per_s_during=14800 fairness=0.995
+makespan pool=steal          groups=1000   flush=64x1ms alone=5062.7 us (ideal 4000.0 us) beside=6371.7 us (nominal fair-share 4004.00 ms, x0.00) share=704.00 bg_tasks_per_s_during=4237 fairness=0.941
+makespan pool=groups         groups=1000   flush=64x1ms alone=5057.2 us (ideal 4000.0 us) beside=5368.28 ms (nominal fair-share 4004.00 ms, x1.34) share=0.82 bg_tasks_per_s_during=14545 fairness=0.998
+makespan pool=prio-r1-m15    groups=1000   flush=64x1ms alone=5110.0 us (ideal 4000.0 us) beside=5391.53 ms (nominal fair-share 4004.00 ms, x1.35) share=0.82 bg_tasks_per_s_during=14493 fairness=0.999
+makespan pool=home           groups=1000   flush=64x1ms alone=5081.3 us (ideal 4000.0 us) beside=136.34 ms (nominal fair-share 4004.00 ms, x0.03) share=31.73 bg_tasks_per_s_during=14339 fairness=0.996

@@ -24,9 +24,9 @@ tiny|all)
 	run tiny-chain-g1000 tiny pools="steal,steal-lifo,groups,prio,home$refs" tasks=2000000 groups=1000 producers=0
 	;;&
 tail|all)
-	run tail-hot1 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=1 outstanding=64 merges=4 seconds=5
-	run tail-busy1000 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=1000 outstanding=1 merges=4 seconds=5
-	run tail-idle10000 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=10000 busy=100 outstanding=1 merges=4 seconds=5
+	run tail-hot1 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=1 outstanding=64 merges=4 seconds=4
+	run tail-busy1000 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=1000 outstanding=1 merges=4 seconds=4
+	run tail-idle10000 tail pools="baseline,steal,groups,prio,prio-r2,home" groups=10000 busy=100 outstanding=1 merges=4 seconds=4
 	;;&
 makespan|all)
 	run makespan-g1000 makespan pools="baseline,steal,groups,prio,home" groups=1000 outstanding=1

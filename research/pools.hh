@@ -140,6 +140,14 @@ protected:
 	template <typename Pending>
 	bool park(unsigned idx, bool& searching, Pending&& pending) {
 		if (_stop.load(std::memory_order_acquire)) { return false; }
+		// Spin first, still unregistered: a burst arriving within spin_us costs no syscall.
+		if (_spin_us) {
+			auto end = now_ns() + std::uint64_t(_spin_us) * 1000;
+			while (now_ns() < end) {
+				if (pending()) { return true; }
+				cpu_relax();
+			}
+		}
 		bool final_check = false;
 		auto observed = _idle.to_parked(idx, searching, &final_check);
 		searching = false;
@@ -147,19 +155,6 @@ protected:
 			if (_idle.unpark_self(idx)) {
 				searching = _idle.to_searching();
 				return true;
-			}
-		}
-		if (_spin_us) {
-			auto end = now_ns() + std::uint64_t(_spin_us) * 1000;
-			while (now_ns() < end) {
-				if (pending()) {
-					if (_idle.unpark_self(idx)) {
-						searching = _idle.to_searching();
-						return true;
-					}
-					break;  // someone else unparked us: fall through to park, which returns at once
-				}
-				cpu_relax();
 			}
 		}
 		_idle.park(idx, observed);
