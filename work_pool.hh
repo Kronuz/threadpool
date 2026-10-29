@@ -26,6 +26,7 @@
 // is Dmitry Vyukov's bounded MPMC queue (1024cores.net, BSD-2-Clause).
 #pragma once
 
+#include <algorithm>             // for std::max
 #include <atomic>                // for std::atomic
 #include <chrono>                // for std::chrono
 #include <cstddef>               // for std::size_t
@@ -437,6 +438,7 @@ struct alignas(64) GroupState {
 	Lane lanes[classes];         // under mu, by WorkClass
 	std::uint32_t running = 0;   // items executing, under mu
 	std::uint32_t waiters = 0;   // threads in WorkGroup::wait(), under mu
+	std::uint32_t suspended = 0; // running items of this group inside its wait(), under mu
 	unsigned width = 0;          // under mu; per class, 0: no cap
 	unsigned weight = 1;         // quanta per turn, under mu
 	bool owned = true;           // under mu; false once the WorkGroup is gone
@@ -467,6 +469,7 @@ class ReadyRing {
 	struct Cell {
 		std::atomic<std::size_t> seq;
 		GroupState* data;
+		std::atomic<std::uint64_t> stamp;  // when the entry was pushed, in ticks; 0: not recorded
 	};
 
 	struct Ring {
@@ -482,11 +485,12 @@ class ReadyRing {
 			for (std::size_t i = 0; i < cap; ++i) {
 				cells[i].seq.store(i, std::memory_order_relaxed);
 				cells[i].data = nullptr;
+				cells[i].stamp.store(0, std::memory_order_relaxed);
 			}
 		}
 
 		// False when closed (or, against the sizing, full): retry on the tail.
-		bool push(GroupState* x) noexcept {
+		bool push(GroupState* x, std::uint64_t stamp) noexcept {
 			auto pos = enq.load(std::memory_order_relaxed);
 			for (;;) {
 				if (pos & closed) {
@@ -501,7 +505,8 @@ class ReadyRing {
 					// (Idle::notify_one); on failure pos reloads, closed bit included.
 					if (enq.compare_exchange_weak(pos, pos + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
 						c.data = x;
-						// release: publishes data to the consumer that acquires seq.
+						c.stamp.store(stamp, std::memory_order_relaxed);
+						// release: publishes data and stamp to the consumer that acquires seq.
 						c.seq.store(pos + 1, std::memory_order_release);
 						return true;
 					}
@@ -511,6 +516,18 @@ class ReadyRing {
 					pos = enq.load(std::memory_order_relaxed);
 				}
 			}
+		}
+
+		// The stamp of the entry next in line, or 0 when there is none (or it is not yet
+		// published). Another consumer may take it meanwhile; the answer is then a stamp
+		// of a recent head, which at worst delays or repeats an aging decision.
+		std::uint64_t head_stamp() const noexcept {
+			auto pos = deq.load(std::memory_order_relaxed);
+			const Cell& c = cells[pos & mask];
+			if (c.seq.load(std::memory_order_acquire) != pos + 1) {
+				return 0;
+			}
+			return c.stamp.load(std::memory_order_relaxed);
 		}
 
 		GroupState* pop() noexcept {
@@ -557,10 +574,11 @@ public:
 		_tail.store(_rings.back().get(), std::memory_order_relaxed);
 	}
 
-	void push(GroupState* x) noexcept {
+	// stamp: the push time in ticks for head_stamp(), or 0.
+	void push(GroupState* x, std::uint64_t stamp = 0) noexcept {
 		for (;;) {
 			// acquire: pairs with reserve()'s publication of a new tail.
-			if (_tail.load(std::memory_order_acquire)->push(x)) {
+			if (_tail.load(std::memory_order_acquire)->push(x, stamp)) {
 				return;
 			}
 			cpu_relax();  // closed: reserve() already published its successor as the tail
@@ -585,6 +603,16 @@ public:
 			r = next;  // the new ring takes posts while the old one drains
 		}
 		return nullptr;
+	}
+
+	// The stamp of the oldest entry still queued, or 0 when there is none.
+	std::uint64_t head_stamp() const noexcept {
+		for (Ring* r = _head.load(std::memory_order_acquire); r; r = r->next.load(std::memory_order_acquire)) {
+			if (auto st = r->head_stamp()) {
+				return st;
+			}
+		}
+		return 0;
 	}
 
 	// The parker's final check. seq_cst: the parker's half of the Dekker pair with a post's
@@ -674,6 +702,12 @@ public:
 		unsigned merge_cap = 0;            // workers merges may hold; 0: threads - reserve
 		std::chrono::nanoseconds quantum = std::chrono::microseconds(100);  // service per turn
 		const char* name_format = "W{:02}";  // a std::format string over the worker index
+		// A merge ticket that has waited this long is picked ahead of flush tickets (0: never).
+		std::chrono::nanoseconds merge_age = std::chrono::milliseconds(100);
+		// Called with a site name when a thread that is not a worker enters wait() or
+		// help_until(), before it blocks: a host aborts or logs there when the thread is one
+		// that must never wait (an event loop). Null: no check.
+		void (*block_guard)(const char* site) noexcept = nullptr;
 	};
 
 private:
@@ -681,12 +715,15 @@ private:
 	unsigned _bg_cap;                  // workers flush and merge turns may hold
 	unsigned _merge_cap;               // workers merge turns may hold
 	std::int64_t _quantum;             // in ticks
+	std::int64_t _merge_age;           // in ticks; 0: merges do not age
+	void (*_block_guard)(const char*) noexcept;
 	threadpool_detail::Idle _idle;
 	threadpool_detail::ReadyRing _ready[threadpool_detail::classes];
 	std::atomic<bool> _stop{false};
 	alignas(64) std::atomic<unsigned> _busy_bg{0};     // workers in flush or merge turns
 	alignas(64) std::atomic<unsigned> _busy_merge{0};  // workers in merge turns
 	alignas(64) std::atomic<unsigned> _extras[threadpool_detail::classes] = {};  // tickets beyond each lane's first; each at most _n
+	alignas(64) std::atomic<std::uint64_t> _aged{0};   // merge turns picked ahead of flush for their age
 	alignas(64) std::atomic<std::size_t> _states{1};   // group states alive, the pool's own included
 	alignas(64) std::atomic<std::uint32_t> _group_wake{0};  // WorkGroup::wait()'s futex word
 	GroupState _own;                   // items posted without a group
@@ -757,7 +794,7 @@ private:
 
 	// Under s.mu, after an item finished or a cancel: wakes wait() callers that may be done.
 	bool waiters_due(GroupState& s) noexcept {
-		if (s.waiters && s.pending() == 0 && s.running <= 1) {
+		if (s.waiters && s.pending() == 0 && s.running <= (s.suspended ? s.suspended : 1)) {
 			// release: under s.mu anyway; the futex compares the word.
 			_group_wake.fetch_add(1, std::memory_order_release);
 			return true;
@@ -773,11 +810,13 @@ private:
 	}
 
 	[[gnu::noinline]] void release_slow(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
+		// A merge entry is stamped for aging; the clock is read only for merges.
+		auto stamp = c == merge ? std::max<std::uint64_t>(threadpool_detail::ticks(), 1) : 0;
 		if (push) {
-			_ready[c].push(s);
+			_ready[c].push(s, stamp);
 		}
 		if (extra) {
-			_ready[c].push(s);
+			_ready[c].push(s, stamp);
 		}
 		if (push || extra) {
 			_idle.notify_one();
@@ -897,10 +936,41 @@ private:
 		}
 	}
 
-	// The next ring entry in class order. Flush and merge turns need a background slot (at
-	// most _bg_cap held, so the reserve stays free for queries) and merges a merge slot (at
-	// most _merge_cap). Slots are taken by RMW before the pop, so the caps are exact; a
-	// query or an empty pick gives them back.
+	// Whether the oldest merge entry has waited longer than merge_age.
+	bool merge_overdue() const noexcept {
+		if (!_merge_age) {
+			return false;
+		}
+		auto stamp = _ready[merge].head_stamp();
+		return stamp && static_cast<std::int64_t>(threadpool_detail::ticks() - stamp) > _merge_age;
+	}
+
+	// The next merge entry if a merge slot (at most _merge_cap) is free, else null.
+	GroupState* pick_merge(unsigned& c, Slots& held) noexcept {
+		if (_ready[merge].size() == 0) {
+			return nullptr;
+		}
+		if (!held.merge) {
+			if (_busy_merge.fetch_add(1, std::memory_order_relaxed) < _merge_cap) {
+				held.merge = true;
+			} else {
+				_busy_merge.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+		if (held.merge) {
+			if (GroupState* s = _ready[merge].pop()) {
+				c = merge;
+				return s;
+			}
+		}
+		return nullptr;
+	}
+
+	// The next ring entry in class order, with one exception: a merge entry older than
+	// merge_age goes before flush, so a flood of flushes cannot starve merges. Flush and
+	// merge turns need a background slot (at most _bg_cap held, so the reserve stays free
+	// for queries) and merges a merge slot (at most _merge_cap). Slots are taken by RMW
+	// before the pop, so the caps are exact; a query or an empty pick gives them back.
 	GroupState* pick(unsigned& c, Slots& held) noexcept {
 		if (GroupState* s = _ready[query].pop()) {
 			release_slots(held);
@@ -918,25 +988,19 @@ private:
 			}
 			held.bg = true;
 		}
+		if (merge_overdue()) {
+			if (GroupState* s = pick_merge(c, held)) {
+				_aged.fetch_add(1, std::memory_order_relaxed);
+				return s;
+			}
+		}
 		if (GroupState* s = _ready[flush].pop()) {
 			release_merge(held);
 			c = flush;
 			return s;
 		}
-		if (_ready[merge].size() != 0) {
-			if (!held.merge) {
-				if (_busy_merge.fetch_add(1, std::memory_order_relaxed) < _merge_cap) {
-					held.merge = true;
-				} else {
-					_busy_merge.fetch_sub(1, std::memory_order_relaxed);
-				}
-			}
-			if (held.merge) {
-				if (GroupState* s = _ready[merge].pop()) {
-					c = merge;
-					return s;
-				}
-			}
+		if (GroupState* s = pick_merge(c, held)) {
+			return s;
 		}
 		release_slots(held);
 		return nullptr;
@@ -1079,6 +1143,8 @@ public:
 		_bg_cap(_n - (options.reserve < _n ? options.reserve : _n - 1)),
 		_merge_cap(options.merge_cap && options.merge_cap < _bg_cap ? options.merge_cap : _bg_cap),
 		_quantum(static_cast<std::int64_t>(double(options.quantum.count()) * threadpool_detail::ticks_per_ns())),
+		_merge_age(options.merge_age.count() > 0 ? std::max<std::int64_t>(1, static_cast<std::int64_t>(double(options.merge_age.count()) * threadpool_detail::ticks_per_ns())) : 0),
+		_block_guard(options.block_guard),
 		_idle(_n) {
 		if (_quantum < 1) {
 			_quantum = 1;
@@ -1107,6 +1173,22 @@ public:
 
 	bool on_worker() const noexcept { return threadpool_detail::tls_here.pool == this; }
 
+	// Merge entries waiting for a worker now (approximate), for a backlog report.
+	std::size_t merge_waiting() const noexcept { return _ready[merge].size(); }
+
+	// How long the oldest waiting merge entry has waited; zero when none does.
+	std::chrono::nanoseconds merge_oldest() const noexcept {
+		auto stamp = _ready[merge].head_stamp();
+		if (!stamp) {
+			return {};
+		}
+		auto waited = static_cast<std::int64_t>(threadpool_detail::ticks() - stamp);
+		return std::chrono::nanoseconds(waited > 0 ? static_cast<std::int64_t>(double(waited) / threadpool_detail::ticks_per_ns()) : 0);
+	}
+
+	// Merge turns taken ahead of flush because they were older than merge_age.
+	std::uint64_t merges_aged() const noexcept { return _aged.load(std::memory_order_relaxed); }
+
 	// Queues item on item.group (the pool's own group when null) in item.cls, from any
 	// thread; never blocks, never allocates.
 	void post(WorkItem& item) noexcept {
@@ -1134,6 +1216,9 @@ public:
 	// merge items. With nothing to run it polls with backoff.
 	template <typename Pred>
 	void help_until(Pred&& pred) {
+		if (_block_guard && !on_worker()) {
+			_block_guard("WorkPool::help_until");
+		}
 		unsigned round = 0;
 		while (!pred()) {
 			if (help_own() || help_query()) {
@@ -1285,15 +1370,41 @@ public:
 		return list;
 	}
 
-	// Blocks until the group has nothing queued and nothing running but the caller (when
-	// called from one of its items). On a worker it serves the group meanwhile, and other
-	// groups' queries, so a wait cannot deadlock on queued work; off the pool it parks.
+	// Blocks until the group has nothing queued and nothing running but waiters: the caller
+	// and the group's other items inside their own wait() when called from one of its items,
+	// so nested and concurrent waits of one group cannot deadlock each other; from outside,
+	// until nothing runs. On a worker it serves the group meanwhile, and other groups'
+	// queries, so a wait cannot deadlock on queued work; off the pool it parks.
 	void wait() noexcept {
 		auto& pool = *_pool;
 		GroupState* s = _s;
 		bool own = threadpool_detail::tls_here.state == s;
 		bool worker = pool.on_worker();
-		std::uint32_t self = own ? 1 : 0;
+		if (!worker && pool._block_guard) {
+			pool._block_guard("WorkGroup::wait");
+		}
+		// The group is quiet when nothing is queued and every running item is a waiter in this
+		// call (the caller's own, or another item of the group suspended in its own wait()).
+		if (own) {
+			s->mu.lock();
+			++s->suspended;
+			bool due = pool.waiters_due(*s);
+			s->mu.unlock();
+			if (due) {
+				threadpool_detail::futex_wake_all(&pool._group_wake);
+			}
+		}
+		struct Resume {
+			GroupState* s;
+			bool own;
+			~Resume() {
+				if (own) {
+					s->mu.lock();
+					--s->suspended;
+					s->mu.unlock();
+				}
+			}
+		} resume{s, own};
 		// Under s->mu: the lane a waiting worker may serve, or -1. From the group's own item
 		// it runs any queued item inline; otherwise it serves as a helper within the width.
 		auto helpable = [&]() -> int {
@@ -1312,7 +1423,7 @@ public:
 			// acquire: pairs with waiters_due()'s increment, made under s->mu.
 			auto word = pool._group_wake.load(std::memory_order_acquire);
 			s->mu.lock();
-			if (s->pending() == 0 && s->running == self) {
+			if (s->pending() == 0 && s->running == (own ? s->suspended : 0)) {
 				s->mu.unlock();
 				return;
 			}
@@ -1333,7 +1444,7 @@ public:
 			s->mu.lock();
 			// Checked again where the waiter registers: a group that went quiet, or work
 			// that came in, since the first look is not slept through.
-			if ((s->pending() == 0 && s->running == self) || helpable() >= 0) {
+			if ((s->pending() == 0 && s->running == (own ? s->suspended : 0)) || helpable() >= 0) {
 				s->mu.unlock();
 				continue;
 			}
