@@ -331,3 +331,71 @@ EAGAIN injection (taken from Re-check 1).
 
 Probes kept: `.scratch/arch/inversion.cc`, `.scratch/arch/build.sh`, `.scratch/arch/config.h` (copy of `.scratch/rc1/config.h`), binaries
 `inversion`, `inversion_tsan`.
+
+## Re-check 2
+
+Re-checker, 2026-10-29. Subject: `threadpool:7a1a5c5` through `threadpool:2947834` (the ruling is `threadpool:6c3491d`). Read `work_pool.hh` at that head
+(wait/on_idle `:1286-1460`, `turn`/`serve`/`helpable` `:893-990`, `grant` `:795-815`), `test/work_wait.cc`, and the two items the lead added (B5, B6). Probes in
+`.scratch/rc2/`: `i4live.cc`, `al2.cc`, `deep.cc`, `wc.cc` (+ `wc_inst.cc`), `b5.cc` (strata's probe, unchanged); `.scratch/arch/inversion` rebuilt; the developer's
+`.scratch/mutl2.py` rerun. Builds under `quiet light`: TSan (`-O1`) and ASan+UBSan (Homebrew LLVM 23), all 7 CTest targets pass on the head in both
+(`.scratch/rc2/tsan.ctest.log`, `asan.ctest.log`).
+
+### Verdicts
+
+- **L2-B2 CLOSED.** The mechanism is deleted: grep over `work_pool.hh`, the docs and `test/` finds no `rescu*`, `spill`, `max_inline`, `suspended`, `quiet`, `help_query`,
+  `help_own`, `help_until`; the quiet-epoch field is gone (`GroupState::epoch` at `:457` is only `cancel()`'s stop token). Only `WorkPool`'s constructor creates threads
+  (`:1186`); `wait()` (`:1306-1334`) has no thread creation, and mutant "a wait creates a thread" dies on I5. Child-group form of the review's `deep`: `deep.cc`
+  (every item posts one item to its own child group and waits) completes at N = 100,000 on 1, 2, 4 workers, plain, and 1, 4 under ASan+UBSan. The own-group form is the
+  I2 death test.
+- **L2-N1 CLOSED** with the ruling: two members of one group waiting on it abort (`check_stack`, `:1289-1295`); what remains is contract items 2 and 3 in `docs/API.md`.
+- **AL1 CLOSED**, with one test weakness (I3c below).
+  - I1 `test/work_wait.cc:318-383` (inversion shape at 1, 2, 4 workers, `foreign == 0`, `q_saw_lease == 0`). Mutant "wait serves a query": killed, and killed on I6.
+  - I2 `:265-312`: self wait, `~WorkGroup`, `cancel_and_wait`, G -> H -> G, plus a control. `here.top` is a parent chain (`Frame`, `:668-692`) and `check_stack` walks it.
+    Mutants "top frame only" and "parents only": both killed by the death tests.
+  - I3 `:388-426`, `:687-723` (I6). Mutant F1 (`tickets + helpers < width`): killed ("I3 width hung") and by I6 (timeout). Mutant F2 (ticket does not yield, `:925-932`):
+    killed on `peak == 1` (`:425`) 3 of 3 reruns and by I6 (`peak_over == 0`), but it SURVIVED once in the full mutant pass beside other light holds, so the I3 test is
+    probabilistic on that mutant; I6 backs it up.
+  - I4 `:432-458`. Mutant "no wake at turn end": killed ("I4 wake hung"). Mutant I4b: see the separate item below.
+  - I5 `:464-545`: 20,000 fan-out waits at 1 and 4 workers with a thread-count sampler and depth peak 2; a 500-group chain on one worker (150 under ASan). Mutant
+    "a wait creates a thread": killed (`:506`).
+  - I6 `:687-723`: random DAGs, 50 groups, widths 0 to 3, 1, 2, 4 workers; mutants I1 and I3 (F1, F2) all killed. Full mutant table: `.scratch/rc2/mut.out`.
+- **AL2 CLOSED.** `on_idle`/`cancel_idle` (`:1438-1462`). Lists are detached whole under `mu` (`take_idle`, `:841`), then fired unlocked (`fire_idle`, `:850`, `next` read before `fn`).
+  Lifetime against group destruction: `~WorkGroup` cancels and waits until idle; every path that makes the group idle (`turn`, `cancel`) takes the list under the lock first, so a
+  node linked at destruction fires before `wait()` can return idle, and `fire_idle` touches only the nodes (not `s`), so the state can be freed under it. Against pool shutdown:
+  groups must be gone first, so no node outlives its group. Callback racing `cancel_idle`: `cancel_idle` returns true only when it unlinked the node, so a false means the
+  list was already detached and `fn` has run or will run, exactly once. Probe `al2.cc` (20,000 iterations each: a thread calling `cancel_idle` against the firing; a group destroyed with a
+  node linked on a busy group, then the node freed after `fn`; pool shutdown last): TSan and ASan+UBSan clean, never fired twice (cancelled 3 / 615, fired 19,997 / 19,385). The suite's AL2 test
+  (`:575-683`) does not cover the destruction or the cancel race; worth adding `al2.cc`'s two loops. Note for X2: `~WorkGroup` does not wait for an `fn` that is mid-call, so a node must stay valid until its `fn` returns (the doc says `fn` may free it).
+- **AR1 CLOSED.** `.scratch/arch/inversion` rebuilt against the head: `ok` at 2 workers (busy 0), 4 (0 and 2), 8 (0 and 6), all with `q_saw_lease=0`; TSan at 2 and 4 clean. The 1-worker run
+  hangs in the probe's own spin (the ruling calls it a probe artefact; the test's 1-worker case drops the spin and passes).
+- **AR2 CLOSED.** `q_saw_lease=0` in every inversion run and in I1 (`foreign == 0`): no item of another group runs on a thread inside a wait.
+- **I4b: I disagree with the developer, the wake has a liveness effect.** The mutant (no wake when a lane becomes helpable, idle only) survives the suite, but a legal acyclic graph hangs
+  without it. `.scratch/rc2/i4live.cc`: 3 workers, reserve 0, query class. G (width 1): g1 runs 300 ms, g2 queued. Y (width 1): y1 calls `G.wait()` (parks, G's width is held). W: b1 calls `G.wait()` (parks). Then Z: z2 calls
+  `Y.wait()` (Y's width is held by y1). Z -> Y -> G, no cycle. g1's turn ends with g2 pending (budget spent), relists G's ticket, and its worker picks z2 and parks on Y: all three workers are parked, a ticket sits on the ring.
+  The real code wakes y1 and b1 at turn end (`waiters_due`, `helpable`), one serves g2, everything finishes (3 of 3 runs `ok`). With the I4b mutant it hangs (3 of 3, the probe's 10 s watchdog, `g2_done=0`).
+  The turn-ending worker is not always free to pick the ticket again, so the wake is needed. Ask: add `i4live` as an I4 test case (it kills I4b).
+- **L2-B5 OPEN (new, from the lead; blocks landing).** `WorkGroup::cancel_and_wait()` (`work_pool.hh:1466-1473`) walks `cancel()`'s list only to count it; it never frees the boxed items, while `~WorkGroup`
+  (`:1323-1331`) does. strata's probe `workgroup_cancel_and_wait_leak.cc` (copy `.scratch/rc2/b5.cc`) against the head, ASan+LSan: `queued live=5`, `dropped=5 live after cancel_and_wait=5 (0 expected if freed)`, then LeakSanitizer reports the
+  boxed items (a direct leak of 48 bytes, indirect 192, from `enqueue`'s `new (std::nothrow)`). Not introduced here (the code is as at `threadpool:2ae90f0`) but `API.md` does not say the caller must free them and cannot: the call returns only a count.
+  Fix: free the boxed items as the destructor does (`item_boxed` -> `box->destroy`), and document that caller-owned items are dropped unrun (or take `cancel()` first); add a test that counts live captures (strata's probe is the test).
+- **L2-B6 OPEN (new, from the lead; blocks landing): the pool is not work-conserving for a group whose tickets were refused at post time.**
+  Reproduced locally on the 16-CPU Mac at load 6 to 9: `.scratch/rc2/wc.cc` (4 workers, reserve 0, 64 items in one group, each holds its worker until 4 run at once or a 300 ms deadline, 300 repetitions):
+  head `peak < 4` in 16, 19 and 15 of 300 (peak 3 every time, so one worker stayed away for the whole 300 ms with about 60 items queued); `threadpool:0244bd3`'s header 150 of 300 (49 to 64 percent); `threadpool:5caedce` 143 of 300. So it predates
+  this branch's changes and the head is better, but not fixed. Mechanism (`wc_inst.cc`, counter on the refusal): `grant()` (`:795-815`) refuses an extra ticket when `spare(c)` is false, and `spare` is `num_unparked() < n` (`:781-790`), where a worker the
+  chain has just woken (the searching worker, `Idle::from_searching` / `notify_one`) counts as unparked. While the main thread is still enqueuing, the chain wakes all four workers; the searchers find an empty ring (the extras were refused while they were counted),
+  and park; nothing grants again because the only other grant points are `post()` (all 64 are posted) and the end of a turn (the running items are inside their turns). In the instrumented runs the refusals per repetition are 61 to 63 of 63 in every failing
+  repetition, against 41 on average in passing ones. The extras are re-granted only when a turn ends (`turn`, `:945-952`), so an under-ticketed group runs narrower than its width for as long as its running items run. For the usual short item the gap
+  closes in one quantum; for a long chore or merge it stays open for the item's duration (not work-conserving), and the rewritten `work_group.cc` case 1 (items that never end their turn) turns that gap into a 10 s failure, which is what CI shows on slow runners.
+  Not a deadlock and not a race: a stall of parallelism with idle workers. Direction (the developer's call, not a prescription): make the refusal not depend on a transient count of woken-but-searching workers, or have a searcher that finds the ring empty re-check
+  for groups with `pending > tickets` before parking. I did not run the CI log (not reachable here) or an enqueue-before-start variant (the pool starts its workers in the constructor; load did it).
+
+### Other checks
+
+- `quiet check` exit 2 (other light holds); all builds and probes ran under `quiet light`, at most 3 jobs.
+- New findings beyond B5 and B6: none in the ruled-wait implementation. One-liner for the lead: the I3 test kills the F2 mutant about 90 percent of the time under load; I6 kills it reliably.
+
+### Verdict
+
+**Do not land.** L2-B2, L2-N1, AL1, AL2, AR1, AR2 are closed; L2-B5 (cancel_and_wait leaks boxed items) and L2-B6 (work-conservation gap that fails `work_group` case 1 on slow runners) are open, and I4b needs a test.
+
+Not run: Linux, FreeBSD and arm64 builds; CI logs; any benchmark or K rerun; consumer rebuilds; the `stress.cc` probes of the first review (superseded by I1 to I6 and `deep.cc`); a revert check for B5/B6 (no fix exists); an enqueue-before-start reproduction of B6.
