@@ -132,8 +132,44 @@ int main() {
 	// it is older than merge_age. ----
 	{
 		Watchdog dog(60, "aging");
-		for (bool aging : {false, true}) {
-			WorkPool pool({.threads = 4, .reserve = 0, .merge_age = aging ? 20ms : 0ms});
+		// The control, without aging: 32 gated flushes (one per group, none reposting) hold all four
+		// workers, a merge is posted behind them, then the gate opens. Strict order starts the merge
+		// after every flush but the up to threads - 1 popped before they counted themselves started.
+		// A self-reposting flood would leave Ring::pop's unpublished-slot window open under load.
+		{
+			WorkPool pool({.threads = 4, .reserve = 0, .merge_age = 0ms});
+			std::vector<std::unique_ptr<WorkGroup>> groups;
+			for (int i = 0; i < 32; ++i) {
+				groups.push_back(std::make_unique<WorkGroup>(pool));
+			}
+			std::atomic<bool> gate{false};
+			std::atomic<int> started{0};
+			std::atomic<int> merge_at{0};
+			for (auto& g : groups) {
+				g->enqueue([&] {
+					started.fetch_add(1);
+					while (!gate.load()) {
+						std::this_thread::yield();
+					}
+				}, WorkClass::flush);
+			}
+			while (started.load() < 4) {
+				std::this_thread::yield();
+			}
+			WorkGroup merges(pool);
+			merges.enqueue([&] { merge_at = started.fetch_add(1) + 1; }, WorkClass::merge);
+			gate = true;
+			for (auto& g : groups) {
+				g->wait();
+			}
+			merges.wait();
+			assert(merge_at.load() >= 33 - 3);
+			assert(pool.merges_aged() == 0);
+			std::printf("work_scheduling OK: aging off: merge started %dth of 33\n", merge_at.load());
+		}
+		// With aging: under a flood the merge runs once it is older than merge_age.
+		{
+			WorkPool pool({.threads = 4, .reserve = 0, .merge_age = 20ms});
 			Flood flood(pool, 32);
 			start(flood);
 			WorkGroup merges(pool);
@@ -142,20 +178,13 @@ int main() {
 			merges.enqueue([&] { ran = true; }, WorkClass::merge);
 			bool in_time = wait_for([&] { return ran.load(); }, 400ms);
 			auto waited = Clock::now() - t0;
-			if (aging) {
-				assert(in_time);
-				assert(waited >= 15ms);  // it was not picked early: it was starved until it aged
-				assert(pool.merges_aged() >= 1);
-			} else {
-				assert(!in_time);  // the control: strict order starves it
-				assert(pool.merges_aged() == 0);
-				assert(pool.merge_waiting() == 1);
-			}
+			assert(in_time);
+			assert(waited >= 15ms);  // it was not picked early: it was starved until it aged
+			assert(pool.merges_aged() >= 1);
 			finish(flood);
 			merges.wait();
 			assert(ran.load());
-			std::printf("work_scheduling OK: aging %s: merge %s (waited %lld ms)\n", aging ? "on" : "off",
-				in_time ? "ran while flushes flooded" : "starved until the flood stopped",
+			std::printf("work_scheduling OK: aging on: merge ran while flushes flooded (waited %lld ms)\n",
 				static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count()));
 		}
 	}
