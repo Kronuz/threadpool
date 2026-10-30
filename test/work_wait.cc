@@ -638,7 +638,9 @@ int main() {
 					std::this_thread::yield();
 				}
 			});
-			g.enqueue([] {});
+			WorkItem queued;  // caller-owned, so the cancelled item needs no freeing
+			queued.run = [](WorkItem*) noexcept {};
+			g.post(queued);
 			assert(wait_for([&] { return started.load(); }, 5000ms));
 			Node n;
 			n.fn = fn;
