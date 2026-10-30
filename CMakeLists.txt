@@ -78,6 +78,29 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(task_group_test PRIVATE threadpool)
   add_test(NAME task_group COMMAND task_group_test)
 
+  add_executable(work_pool_test test/work_pool.cc)
+  target_link_libraries(work_pool_test PRIVATE threadpool)
+  add_test(NAME work_pool COMMAND work_pool_test)
+
+  add_executable(work_group_test test/work_group.cc)
+  target_link_libraries(work_group_test PRIVATE threadpool)
+  add_test(NAME work_group COMMAND work_group_test)
+
+  add_executable(work_scheduling_test test/work_scheduling.cc)
+  target_link_libraries(work_scheduling_test PRIVATE threadpool)
+  add_test(NAME work_scheduling COMMAND work_scheduling_test)
+
+  add_executable(work_wait_test test/work_wait.cc)
+  target_link_libraries(work_wait_test PRIVATE threadpool)
+  add_test(NAME work_wait COMMAND work_wait_test)
+
+  # Benchmarks (not tests): -DTHREADPOOL_BUILD_BENCH=ON builds them; see bench/.
+  option(THREADPOOL_BUILD_BENCH "Build the benchmarks" OFF)
+  if(THREADPOOL_BUILD_BENCH)
+    add_executable(kernel_time bench/kernel_time.cc)
+    target_link_libraries(kernel_time PRIVATE threadpool)
+  endif()
+
   # A runnable tour of the library (not a test): build & run ./build/threadpool_demo
   add_executable(threadpool_demo examples/demo.cc)
   target_link_libraries(threadpool_demo PRIVATE threadpool)

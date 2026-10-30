@@ -1,0 +1,16 @@
+workloads: tiny threads=16 trials=5 pools=baseline,groups,workpool,
+tiny pool=baseline       groups=1000   producers=4 work_ns=0     tasks=500000 wall=4.035s rate=0.12M/s ns_per_task=8069.5 post_ns=32277.8 cpu_ns_per_task=65457.2
+tiny pool=groups         groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.041s rate=12.06M/s ns_per_task=82.9 post_ns=330.9 cpu_ns_per_task=1155.0
+tiny pool=workpool       groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.038s rate=13.20M/s ns_per_task=75.8 post_ns=303.1 cpu_ns_per_task=1058.1
+tiny pool=baseline       groups=1000   producers=4 work_ns=0     tasks=500000 wall=3.919s rate=0.13M/s ns_per_task=7837.1 post_ns=31348.5 cpu_ns_per_task=61521.1
+tiny pool=groups         groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.053s rate=9.42M/s ns_per_task=106.1 post_ns=424.3 cpu_ns_per_task=1496.4
+tiny pool=workpool       groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.039s rate=12.68M/s ns_per_task=78.8 post_ns=315.4 cpu_ns_per_task=1176.7
+tiny pool=baseline       groups=1000   producers=4 work_ns=0     tasks=500000 wall=4.114s rate=0.12M/s ns_per_task=8227.0 post_ns=32908.1 cpu_ns_per_task=65776.1
+tiny pool=groups         groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.024s rate=21.11M/s ns_per_task=47.4 post_ns=132.4 cpu_ns_per_task=707.2
+tiny pool=workpool       groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.038s rate=13.29M/s ns_per_task=75.3 post_ns=300.2 cpu_ns_per_task=1128.2
+tiny pool=baseline       groups=1000   producers=4 work_ns=0     tasks=500000 wall=4.026s rate=0.12M/s ns_per_task=8052.4 post_ns=32209.4 cpu_ns_per_task=64189.5
+tiny pool=groups         groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.033s rate=15.29M/s ns_per_task=65.4 post_ns=251.6 cpu_ns_per_task=925.5
+tiny pool=workpool       groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.039s rate=12.85M/s ns_per_task=77.8 post_ns=311.2 cpu_ns_per_task=1083.0
+tiny pool=baseline       groups=1000   producers=4 work_ns=0     tasks=500000 wall=4.143s rate=0.12M/s ns_per_task=8286.1 post_ns=33144.3 cpu_ns_per_task=64429.4
+tiny pool=groups         groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.033s rate=15.17M/s ns_per_task=65.9 post_ns=263.2 cpu_ns_per_task=898.1
+tiny pool=workpool       groups=1000   producers=4 work_ns=0     tasks=500000 wall=0.035s rate=14.37M/s ns_per_task=69.6 post_ns=277.9 cpu_ns_per_task=1006.7

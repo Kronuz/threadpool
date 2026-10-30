@@ -11,6 +11,10 @@ pulling tasks from one shared queue, with futures for results and owner-scoped
 task groups you can cancel and wait on. For C++ services that need background
 workers without pulling in a framework.
 
+`WorkPool` is its scheduler for many owners on one pool: thousands of groups (one per
+index, say) take fair turns, queries run ahead of flushes and merges, posting a
+caller-owned item allocates nothing, and idle workers sleep on a futex.
+
 ![threadpool: callers and task groups feed one queue; named workers drain it](docs/threadpool.svg)
 
 ## ✨ Highlights
@@ -26,6 +30,11 @@ workers without pulling in a framework.
 - **State without locks:** `size()`, `running_size()`, and `threadpool_workers()`
   read atomic counters.
 - **Pluggable tracing** and thread registration, no-ops by default.
+- **`WorkPool` and `WorkGroup`** (`work_pool.hh`): per-group FIFOs served by deficit
+  round robin, so one group alone fans out to every worker and many busy groups share
+  them equally; three classes (`query`, `flush`, `merge`) with workers reserved for
+  queries; `cancel()` that hands the queue back; waits that serve the awaited group instead of
+  blocking a worker, and an idle notification for loops and coroutines; Tokio's idle protocol over one futex per worker.
 
 ## 📦 Installation
 
@@ -81,6 +90,27 @@ With a task group, scoped to one owner:
 }   // leaving the scope cancels what has not started and waits for the rest
 ```
 
+Many owners on one `WorkPool`, with items you own:
+
+```cpp
+#include "work_pool.hh"
+
+WorkPool pool;                   // a worker per hardware thread, one kept for queries
+WorkGroup index(pool);           // one group per owner
+
+struct Piece : WorkItem {
+	int shard;
+};
+Piece piece;
+piece.shard = 7;
+piece.cls = WorkClass::query;
+piece.run = [](WorkItem* w) noexcept { std::printf("shard %d\n", static_cast<Piece*>(w)->shard); };
+index.post(piece);               // no allocation
+
+index.enqueue([] { std::puts("a boxed flush"); });
+index.wait();
+```
+
 [`examples/demo.cc`](examples/demo.cc) runs a fuller tour: futures, load spread
 across workers, the counters, both shutdowns, and `TaskQueue`.
 
@@ -88,17 +118,20 @@ across workers, the counters, both shutdowns, and `TaskQueue`.
 
 - ✅ A fixed pool of long-lived workers for request handling, indexing, or other
   background work, with futures or group-scoped cancellation.
-- ❌ Work-stealing or very high task rates: the queue is a `std::deque` behind a
-  mutex. `ConcurrentQueue` and `BlockingConcurrentQueue` keep moodycamel's API,
-  so its lock-free queues drop in when the mutex becomes the bottleneck.
+- ✅ `WorkPool`: one pool shared by many owners, with fairness between them, latency
+  classes, and high rates of tiny items.
+- ❌ `ThreadPool` at very high task rates: its queue is a `std::deque` behind a mutex
+  and every enqueue signals a condition variable. Use `WorkPool` there.
+- ❌ Work-stealing of fine-grained fork-join work: neither pool steals.
 - ❌ Coroutine scheduling: see [task](https://github.com/Kronuz/task).
 
 ## 📚 Documentation
 
-- [docs/API.md](docs/API.md): `ThreadPool`, `TaskGroup`, `Thread`, `TaskQueue`,
-  and the free functions.
+- [docs/API.md](docs/API.md): `ThreadPool`, `TaskGroup`, `WorkPool`, `WorkGroup`,
+  `Thread`, `TaskQueue`, and the free functions.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the worker loop, shutdown, task wrappers,
-  `TaskGroup`'s scheduling, and the concurrency model.
+  `TaskGroup`'s scheduling, `WorkPool`'s rings, turns, classes, and idle protocol, and
+  the concurrency model.
 - [AGENTS.md](AGENTS.md): repository map, invariants, traps, and how to plug in
   tracing.
 

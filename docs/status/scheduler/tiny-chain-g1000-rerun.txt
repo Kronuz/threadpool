@@ -1,0 +1,15 @@
+workloads: tiny threads=16 trials=7 pools=groups,workpool,
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.036s rate=55.89M/s ns_per_task=17.9 cpu_ns_per_task=168.5
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.024s rate=83.42M/s ns_per_task=12.0 cpu_ns_per_task=131.5
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.026s rate=78.12M/s ns_per_task=12.8 cpu_ns_per_task=171.5
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.028s rate=72.02M/s ns_per_task=13.9 cpu_ns_per_task=201.2
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.023s rate=86.27M/s ns_per_task=11.6 cpu_ns_per_task=176.9
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.029s rate=68.93M/s ns_per_task=14.5 cpu_ns_per_task=215.5
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.023s rate=85.64M/s ns_per_task=11.7 cpu_ns_per_task=175.0
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.036s rate=55.78M/s ns_per_task=17.9 cpu_ns_per_task=274.2
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.037s rate=53.41M/s ns_per_task=18.7 cpu_ns_per_task=170.7
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.030s rate=67.70M/s ns_per_task=14.8 cpu_ns_per_task=142.6
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.037s rate=54.44M/s ns_per_task=18.4 cpu_ns_per_task=169.8
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.034s rate=59.44M/s ns_per_task=16.8 cpu_ns_per_task=211.7
+tiny pool=groups         groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.025s rate=78.55M/s ns_per_task=12.7 cpu_ns_per_task=187.2
+tiny pool=workpool       groups=1000   producers=0 work_ns=0     tasks=2000000 wall=0.032s rate=63.01M/s ns_per_task=15.9 cpu_ns_per_task=236.5

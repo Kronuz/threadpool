@@ -1,0 +1,11 @@
+workloads: makespan threads=16 trials=5 pools=workpool-r0,workpool,
+makespan pool=workpool-r0    groups=1000   flush=64x1ms alone=4411.7 us (ideal 4000.0 us) beside=3889.80 ms (nominal fair-share 4004.00 ms, x0.97) share=1.05 bg_tasks_per_s_during=15631 fairness=0.999
+makespan pool=workpool       groups=1000   flush=64x1ms alone=5151.1 us (ideal 4000.0 us) beside=4165.81 ms (nominal fair-share 4004.00 ms, x1.04) share=1.04 bg_tasks_per_s_during=14825 fairness=1.000
+makespan pool=workpool-r0    groups=1000   flush=64x1ms alone=4456.7 us (ideal 4000.0 us) beside=3902.07 ms (nominal fair-share 4004.00 ms, x0.97) share=1.04 bg_tasks_per_s_during=15793 fairness=1.000
+makespan pool=workpool       groups=1000   flush=64x1ms alone=5181.3 us (ideal 4000.0 us) beside=4219.58 ms (nominal fair-share 4004.00 ms, x1.05) share=1.02 bg_tasks_per_s_during=14826 fairness=1.000
+makespan pool=workpool-r0    groups=1000   flush=64x1ms alone=4395.2 us (ideal 4000.0 us) beside=4114.30 ms (nominal fair-share 4004.00 ms, x1.03) share=0.99 bg_tasks_per_s_during=15742 fairness=1.000
+makespan pool=workpool       groups=1000   flush=64x1ms alone=5170.4 us (ideal 4000.0 us) beside=4162.90 ms (nominal fair-share 4004.00 ms, x1.04) share=1.04 bg_tasks_per_s_during=14838 fairness=1.000
+makespan pool=workpool-r0    groups=1000   flush=64x1ms alone=4507.8 us (ideal 4000.0 us) beside=3919.12 ms (nominal fair-share 4004.00 ms, x0.98) share=1.03 bg_tasks_per_s_during=15781 fairness=1.000
+makespan pool=workpool       groups=1000   flush=64x1ms alone=5168.7 us (ideal 4000.0 us) beside=4159.90 ms (nominal fair-share 4004.00 ms, x1.04) share=1.04 bg_tasks_per_s_during=14841 fairness=1.000
+makespan pool=workpool-r0    groups=1000   flush=64x1ms alone=4497.0 us (ideal 4000.0 us) beside=3921.08 ms (nominal fair-share 4004.00 ms, x0.98) share=1.03 bg_tasks_per_s_during=15797 fairness=1.000
+makespan pool=workpool       groups=1000   flush=64x1ms alone=5151.7 us (ideal 4000.0 us) beside=4163.63 ms (nominal fair-share 4004.00 ms, x1.04) share=1.04 bg_tasks_per_s_during=14850 fairness=1.000

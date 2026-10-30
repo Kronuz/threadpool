@@ -209,6 +209,82 @@ Fairness is per pool trip, not per thread: plain `pool.enqueue` work shares the
 same FIFO with the tickets. `pool.clear()` drops tickets the group still counts,
 which strands its queued tasks; don't clear a pool that groups use.
 
+## `WorkPool`
+
+`WorkPool` (`work_pool.hh`) is a second, independent pool for hosts that run many
+owners on one set of workers: tens of thousands of open indexes, each a `WorkGroup`,
+with no thread setting. It shares only `Thread` and the trace hooks with `ThreadPool`;
+`threadpool.hh` and `task_group.hh` do not change. The design and its measurements are
+the research note on the `research/scheduler` branch (`docs/research/scheduler.md`).
+
+**Items are the caller's.** A `WorkItem` is a function pointer, its group, its
+`WorkClass`, and an intrusive link. The pool links items into FIFOs while they wait and
+calls `run` once, so a post allocates nothing. `WorkGroup::enqueue` is the boxed
+convenience: one allocation, freed after it runs.
+
+**Lanes and the ready ring.** Each group has a lane per class (query, flush, merge): a
+FIFO under the group's spinlock, a ticket count, and a deficit. A lane with queued work
+holds a ticket, which is its place on that class's ready ring. A worker pops a ticket,
+serves the lane for a turn, and puts the ticket back at the tail if work remains. The
+ring is Dmitry Vyukov's bounded MPMC queue of group pointers (one CAS per push or pop).
+Rings are chained: when a group opens and the ring could fill, a ring twice the size
+becomes the tail, consumers drain the old one first, and retired rings stay allocated
+until the pool ends. A post therefore never blocks.
+
+**Deficit round robin.** A turn is `quantum * weight` of service (100 µs by default),
+measured with the cycle counter (`rdtsc`, `cntvct_el0`): one read per item, where a
+`steady_clock` read costs 31 µs under a VM's `hpet`. A turn that overruns leaves debt,
+so a group with long items skips turns until it is even; a lane that empties keeps
+neither credit nor debt. A quantum below the common item size means a group that just
+became active waits for no one's backlog.
+
+**Tickets.** A lane's first ticket is free. More are granted, one per post or per
+quantum, while its queue is longer than its tickets, its width has room, and a worker is
+idle beyond the reserve, so an index alone fans out to every worker within a few wakes.
+Extra tickets are capped at one per worker per class, and an extra ticket retires at the
+end of a turn while other groups wait, so busy groups converge on equal shares. The ring
+therefore needs (open groups + workers) entries per class.
+
+**Classes and the reserve.** Workers pick the query ring first, then flush, then merge.
+Strict order alone would let long background items take every worker, so a flush or
+merge turn holds one of `threads - reserve` background slots, taken with an RMW before
+the pop, and merges hold at most `merge_cap`. A query waits for a wake, not for an item
+to end. A merge entry carries its push time; once the oldest has waited longer than
+`merge_age` (100 ms), a background pick takes it before the flush ring, under the same
+slots, so a flood of flushes cannot starve merges and the reserve stays free. Starving
+flushes with a flood of queries is possible; nothing ages them.
+
+**Idle protocol.** Tokio's (`idle.rs`, MIT). One 64-bit word counts searching and
+unparked workers. A post wakes a sleeper only when no worker is searching; at most half
+the workers search; the last searcher to find work wakes the next; the last to park
+checks the rings once more. The poster's ring CAS and the parker's state RMW are both
+seq_cst, so either the post sees the parker or the parker's check sees the post. Workers
+sleep on an untimed platform futex each (`futex(2)`, `os_sync_wait_on_address`,
+`_umtx_op`), never `std::atomic::wait` (FreeBSD's libc++ spins first) and never a timed
+wait (a timed condvar wake costs FreeBSD several times the kernel time). Shutdown unparks
+every sleeper.
+
+**Waiting without deadlock.** `WorkGroup::wait()` on a worker serves only the group it
+waits on, inline, as a helper within the group's width, and nothing else: no query, no
+other group's item, no new thread. A helper is admitted to a width-capped group while fewer
+than `width` turns are being served (tickets still on the ring do not count, or workers
+all waiting would starve the group), and a ring turn that finds a helper has taken its
+place gives its ticket up. `tls_here.top` chains the items running on the stack, and a
+wait on a group in the chain, its own included, aborts: the waiter would wait for work
+below it. With an acyclic wait-for graph (items wait only on lower groups) every wait
+ends, since a worker's wait never needs another free worker; the argument is in
+`docs/mechanisms/work-pool.md`. Parked waiters wake when a turn ends with the group idle or
+helpable. A thread that is not a worker calls `Options::block_guard` first, where a host
+aborts for an event loop, which joins a group through `on_idle()` instead: a one-shot
+callback run by the thread that makes the group idle.
+
+**Lifetime.** A group's state is allocated when the `WorkGroup` opens and freed by
+whoever drops its last reference: the destructor, or the worker that pops its last
+stale ticket after a cancel. Closing never waits for the group's turn to come around.
+`cancel()` returns the queued items to the owner; the destructor cancels, frees queued
+boxed items, and waits for running ones. `sleep_until(deadline, group)` is one timed
+futex wait on the group's word, which `cancel()` bumps.
+
 ## Concurrency model
 
 The pool is many-producer, many-consumer, with all sharing mediated by the

@@ -1,0 +1,6 @@
+workloads: tiny threads=16 trials=5 pools=workpool,
+tiny pool=workpool       groups=1000   producers=1 work_ns=0     tasks=500000 wall=0.048s rate=10.42M/s ns_per_task=96.0 post_ns=95.7 cpu_ns_per_task=1168.7
+tiny pool=workpool       groups=1000   producers=1 work_ns=0     tasks=500000 wall=0.025s rate=19.96M/s ns_per_task=50.1 post_ns=50.1 cpu_ns_per_task=701.0
+tiny pool=workpool       groups=1000   producers=1 work_ns=0     tasks=500000 wall=0.031s rate=16.26M/s ns_per_task=61.5 post_ns=61.5 cpu_ns_per_task=852.0
+tiny pool=workpool       groups=1000   producers=1 work_ns=0     tasks=500000 wall=0.025s rate=20.40M/s ns_per_task=49.0 post_ns=48.9 cpu_ns_per_task=750.1
+tiny pool=workpool       groups=1000   producers=1 work_ns=0     tasks=500000 wall=0.027s rate=18.69M/s ns_per_task=53.5 post_ns=53.3 cpu_ns_per_task=724.1
