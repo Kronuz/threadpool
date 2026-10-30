@@ -8,8 +8,9 @@
 - Branch / worktree: `phase7c/l2-scheduler` at `~/code/Kronuz/threadpool-wt/l2-scheduler`, from
   `feature/scheduler` at `threadpool:5caedce`, which already sits on main `threadpool:394aaea` (the rebase
   was a no-op, so no history was rewritten; `feature/scheduler` is untouched).
-- State: the architect's ruling on B2 and N1 (AL1, AL2, AR2) is implemented; B1, B3 and B4 closed in the re-check; the re-check of
-  B2 and N1, CI and the K reruns' read are the lead's. Not merged.
+- State: the architect's ruling on B2 and N1 (AL1, AL2, AR2) is implemented; B1, B3 and B4 closed in the re-check; re-check 2's
+  B5, B6 and the two test gaps (I4b liveness, the AL2 loops) are fixed in `threadpool:e28a89c` (L2-14) and need the
+  rechecker; CI and the K reruns' read are the lead's. Not merged.
 - Done criteria (the task's list; ticked with evidence):
   - [x] L2-1. K1 to K3 reruns on the final code. Data in `docs/status/phase7c-l2/`, Mac x86_64, 16 workers,
     strict hold, 5 trials, medians (range):
@@ -147,10 +148,37 @@
     176 / 312; 1 hot group p99 167 us against 162; 10,000 groups p99 147 us against 179; background throughput 16.7k tasks/s
     against 16.6k. Deleting help from waits does not move any row outside the earlier ranges (the harness never waits from a
     worker; the hot path changed only by the frame in `run_item` and one `waiters`/`idle` check per turn).
+  - [x] L2-14. Re-check 2's items. B5: `cancel()`, `cancel_and_wait()` and `~WorkGroup` share `WorkGroup::cancel_items()`, which
+    frees boxed items unrun (before waiters and idle nodes hear the group is idle) and returns the caller-owned ones;
+    `test/work_group.cc` case 17 counts live captures after each path; mutant "cancel_and_wait walks the list and never frees" dies
+    on `live == 0` (case 17), and "cancel_items frees nothing" dies (case 8 hangs). B6: the design changed rather than the
+    count. A lane has at most one ticket on the ring; a post lists one when none is listed, the worker that pops one lists the
+    next before it runs its first item, and a turn that ends with items left lists its own (`grant`, `turn`). `spare()`,
+    `num_unparked()`, the pool-wide `_extras` budget and the extra-ticket path are gone; the ring needs `states + 1` entries.
+    Invariant in `docs/mechanisms/work-pool.md` ("Work conservation"). My first cut (drop `spare()` only) kept `_extras` and
+    failed `case 18b` (the extras budget held by items in turns starved a group, 10 s stall), which is why the budget went too.
+    Proof: `.scratch/rc2/wc.cc` (64 long items, deadline 300 ms) under 6 CPU burners, 150 runs at each of 1 to 8 workers:
+    1,200 runs, `peak < workers` in 0 (the head was 15 to 19 in 300 at 4 workers); `test/work_group.cc` 30 runs beside 8
+    burners, 0 failures; case 1 passes on every run. New `test/work_group.cc` case 18 (a: one group of long items as wide as the
+    pool at 1 to 8 workers, 20 reps each; b: a group posted while 3 of 4 workers are held widens when they finish). Mutants
+    (`.scratch/mutb.py`, all die): old `spare()` counting restored (case 1 and 18); no list at turn start (case 1); turn end
+    drops the ticket (hang); post lists only when `pending > tickets` (case 18); cancel_and_wait leak (case 17).
+    Re-check 2's I4b test: `test/work_wait.cc` "I4 liveness" (`.scratch/rc2/i4live.cc`) kills mutant I4b ("TIMEOUT: I4 liveness
+    hung"). AL2: `test/work_wait.cc` "AL2 lifetime" adds `al2.cc`'s two loops (2,000 each; 16 cancelled and 1,984 fired once in the
+    first run). All `.scratch/mutl2.py` mutants (14, with two new cancel_idle ones) die. TSan (`-O1`) and ASan+UBSan builds:
+    all 7 targets pass once and the 4 `work_` targets pass 3 more times in each. K1 to K3 once under `quiet strict`
+    (`docs/status/phase7c-l2/k-b6/`, 16 workers, 5 trials, medians), against L2-13: K1 1 group 216 against 241 ns/task, 1,000
+    groups 54 against 143, 10,000 groups 163 (54-173) against 146, 1 us tasks 85 against 81, 4 producers 40 against 79, chains
+    16 against 14. K2 one group alone 5.17 ms (reserve 0: 4.46); share 1.04 (1.02-1.04) against 1.01, reserve 0 1.03 (0.99-1.05);
+    Jain 1.000. K3 (reserve 1, the default) p50/p99/p99.9 beside 1,000 busy groups 8.1 / 179 / 376 us against 7.6 / 158 / 312; hot
+    group 7.7 / 165 / 330 against 7.9 / 167 / 338; 10,000 groups 7.9 / 169 / 310 against 7.6 / 147 / 285; background 16.6k tasks/s
+    against 16.7k. Reserve 2 p99 read higher than L2-13 (151 against 61 us hot group); an interleaved A/B of the old head and
+    this one (3 rounds each, `.scratch/kab.sh`) shows 134 against 155 us hot and 147 against 163 busy with overlapping ranges, so
+    that gap is mostly run-to-run state; watch it at the gate.
   - [ ] L2-10. CI green on the pushed branch: run 40981849396 (workflow_dispatch; the workflow has no push trigger for this prefix) was queued when I stopped, no job result yet. The lead watches.
 - Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs commit after it;
   the review round (`threadpool:0244bd3`, B1, B3, B4); `threadpool:7a1a5c5` the ruled wait, `on_idle` and `test/work_wait.cc`;
-  `threadpool:19a17d0` the ASan chain length and ARCHITECTURE.
+  `threadpool:19a17d0` the ASan chain length and ARCHITECTURE; `threadpool:e28a89c` B5, B6 and the two test gaps (L2-14).
 - Doing: nothing.
 - Next:
   1. The lead: CI. Run 40995760989 (`threadpool:5b482da`) had linux-asan-ubsan fail: LeakSanitizer found a boxed item that
