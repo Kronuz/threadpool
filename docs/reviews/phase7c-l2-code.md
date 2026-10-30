@@ -178,3 +178,156 @@ not on CI.
 Not run: Linux, FreeBSD and arm64 builds; any benchmark; consumer rebuilds; the full CTest suite under TSan/ASan on the fix head (the six mutants ran the plain build of
 `work_scheduling_test` in a copy; the sanitizers ran the review's stress probes plus the new rescue probes); the other mutants (M1 to M9, unchanged by this commit);
 an EAGAIN test on Linux (the injection is a macOS dyld interpose); a run of `work_pool_test`/`work_group_test` beyond the load runs above.
+
+## Architect ruling on B2 and N1
+
+- Date: 2026-10-29.
+- Reviewed: `threadpool:b1fe0c3` (`work_pool.hh:442-444`, `:661-671`, `:938-990`, `:1101-1140`, `:1299-1310`, `:1378`, `:1463-1577`), this file's Re-check 1,
+  `docs/API.md:100-160`, `docs/mechanisms/work-pool.md`; strata `strata-wt/phase7c-l5` at `strata:0bc8969` (`include/strata/core/executor.hh:27-40`,
+  `work_pool_executor.hh:73-118`, `pool_executor.hh:60-100`, `index.hh:1721-1734`, `:1880-1888`, `:2841`, `:3103-3105`, `:3392-3410`, `owner.hh:1-40`);
+  Xapiand `docs/design/phase7c.md` D4, D5 (`:188-245`); task `task:9a85e89` (`task.hh:687-740`, `event`).
+- Checked against: Lucene `search/TaskExecutor.java:83-115` (parity-src), Rayon `rayon-core-1.13.0/src/registry.rs:780-817`, Tantivy 0.26
+  `core/executor.rs:44-80`, `indexer/segment_updater.rs:262-341,516`. oneTBB from memory (not on this machine).
+- Checked by: Homebrew LLVM, `-O2` and `-O1 -fsanitize=thread`; probe `.scratch/arch/inversion.cc` (build `.scratch/arch/build.sh`, binaries
+  `inversion`, `inversion_tsan`).
+  - Not run: an implementation of the ruling (none exists yet); Linux, FreeBSD, arm64; any benchmark; the EAGAIN probe (Re-check 1's numbers are taken as given).
+
+### Decision
+
+**(b), completed by the awaitable half of (c). (a) is rejected.** A wait serves only the group it waits on, a wait on a group already on the calling
+stack (its own group included) is a programming error that aborts, no thread is ever created by a wait, and a thread that must not block (an event
+loop, a coroutine) joins a group through an idle notification instead of `wait()`. The own-group "quiet" semantics, the epoch, `suspended`,
+`max_inline_depth`, the rescue threads, and serving other groups' queries from a wait are deleted, not tuned.
+
+### Why: the current model is unsound for acyclic programs, independent of depth
+
+AR1. **Help-anything deadlocks an acyclic group graph** (new; it applies to the head and to (a), which keeps the mechanism). A waiter that finds
+nothing to serve in the awaited group runs other groups' queries (`work_pool.hh:1553-1559`, `help_query`). The query lands on top of the waiter's
+own item, so if the query waits on that item's group, neither can finish. Probe `.scratch/arch/inversion.cc` (`./inversion <threads> <timeout_s>
+<busy>`): groups Q -> G -> H, nothing waits on Q. `g` (G, flush) posts `h` (H, 1.5 s) and calls `H.wait()` while `q` (Q, query, calls `G.wait()`) is
+queued. Results: 2 workers 3 of 3 hang, 4 workers with 2 busy 1 of 2, 8 workers with 6 busy 1 of 1, TSan 2 workers 1 of 1 (no race reported, hang).
+In every hang `h` had finished (`h_running=1`) and `q` ran on `g`'s thread (`q_saw_lease=1`). The 1-worker run is a probe artefact (`g` spins on `h`,
+which cannot start). The graph has no cycle; the deadlock is made by the scheduler.
+
+AR2. **Help-anything leaks thread identity.** In the same run, `q` read `g`'s thread-local (`q_saw_lease=1`). strata counts lease scopes per thread
+(`owner.hh:31-38`, `owner_thread().leases`), so a chore of index B inlined above a commit chore of index A passes `owner_only()` for B in debug builds.
+Serving only the awaited group keeps the inlined work within what strata already marks (`work_pool_executor.hh:64`, `off_owner_scope`).
+
+AR3. **The depth and thread costs come from self-waits, which no consumer needs.** B2's shape is N items of G each calling `G.wait()`; the waiters
+are members of what they wait for, so each queued waiter nests on the next (B2) and the "quiet" rule needs `suspended` and an epoch, which breaks
+when a sibling returns early (N1). The rescue threads move that recursion into threads (Re-check 1: 315 threads for 20,000 waiters) and add a
+failure path (EAGAIN deadlock). Any pool-wide cap on rescue threads moves the hang to the cap; no cap is unbounded memory under the
+many-indexes workload. Neither is a stated, load-bearing limit, so (a) cannot be made sound.
+
+### The consumers' actual use (all of it is (b)-shaped)
+
+- strata waits only from the index's owner on the index's own child groups: `publish_merges` on the merge group (`index.hh:3105`),
+  `finish_deletes`/`end_deletes` on the delete group (`:3395`, `:3405`), and `cancel()`/destruction of each (`work_pool_executor.hh:94-113`).
+  The posted work does not wait: `run_merge` (`:2841`), `run_delete` (`:3432`), and the run builds (`:1887`, polled by `take_runs`, never joined).
+  The groups are opened per index (`:1728-1731`, width 1 by default), so the owner is never a member of what it waits on. Under Xapiand the owner
+  is a chore of the index's group X (D5), so the chain is X chore -> M or D item: inline depth 2, whatever the number of indexes or items.
+- strata's own `inline_executor` already runs the awaited work on the waiter's thread (`executor.hh:107`), so inline service of the awaited group
+  is the model strata was written against.
+- Xapiand D4 (`phase7c.md:203-207`) is the one own-group use: "a chore that waits for its own index's work calls `WorkGroup::wait`", and the
+  carried V2 negative test is an own-group wait. Under the ruling that wait moves to the task that holds the turn (it awaits the group's idle
+  notification) or the chore posts what it waits for to a child group.
+- No other repository under `~/code/Kronuz` uses `WorkGroup` or `help_until` (grep; only strata's binding).
+
+### Practice elsewhere
+
+- Lucene `TaskExecutor.invokeAll` (`:83-115`): the caller runs unstarted tasks of its own batch only (a shared index counter), then blocks on the
+  futures of the ones others claimed; the comment at `:100-104` names deadlock avoidance when the caller is one of the executor's threads. That is
+  (b). Lucene merges run on `ConcurrentMergeScheduler`'s own threads, never joined from a pool worker.
+- Tantivy merges and segment updates run on dedicated pools that the caller joins from outside (`segment_updater.rs:281-312`, `:341`, `:516`);
+  search fan-out is a Rayon scope (`executor.rs:65`).
+- Rayon's waiter steals anything (`registry.rs:788-808`: local, then other deques and the injector). That is help-anything; it is sound for
+  pure compute that never blocks or holds locks, and Rayon documents that a job blocking inside the pool can deadlock. strata merges and Xapiand
+  chores do I/O and hold leases, so the Rayon model does not transfer.
+- oneTBB (from memory, not read here): a `wait` also takes any arena task, and `this_task_arena::isolate` was added so a waiting thread takes only
+  tasks spawned inside the region, which is (b) as an opt-in; it also stops stealing past a stack threshold. We make isolation the only mode.
+
+### Progress argument the implementation must make true
+
+Obligation on the program: the wait-for graph is acyclic (an edge P -> G when an item of P may wait on G or block on something an item of G
+produces), and an item blocks only through `wait()` on a lower group or on a bounded external event.
+
+Claim: every `wait()` returns. Take a non-returning `wait(G)` with G of least height. (1) Every running item of G finishes: above it on its stack sit
+only its own wait on a lower group and that group's items (I1, I2), and those waits return by minimality. (2) Queued items of G get served: a worker
+waiter is admitted whenever fewer than `width` turns of G are being served, ring tickets not counted (I3, the B1 rule at `:938-948`), and the
+served turns end by (1); waking it then is I4. So a worker's wait never needs another free worker. (3) Hence every worker returns to its loop, so a
+non-worker waiter's ring ticket is popped (bg and merge slots are held only during turns, which end). Contradiction. AR1's counterexample is exactly
+step (1) failing: an unrelated item above a running item of G.
+
+### Invariants (each with a test and a mutant that must die)
+
+- **I1 Help scope.** A wait on G runs only items of G, inline, as a width-bounded helper; it never runs another group's work or a query.
+  Test: the AR1 shape (`inversion.cc`, made a CTest case with a watchdog) at 1, 2 and 4 workers passes; a recorder shows no item of another group
+  runs on the waiter's thread inside the wait window. Mutant: restore `help_query()` in `wait()` -> the AR1 case hangs.
+- **I2 No wait on the calling stack.** `here` becomes a chain (a parent pointer per inline frame); `wait()`, `cancel_and_wait()` and `~WorkGroup`
+  on any group present in the chain call `std::abort` after naming the site (all builds; a hang is the alternative). Tests (death tests): self-wait,
+  `~WorkGroup` from its own item, and a G -> H -> G chain on one stack. Mutants: drop the chain walk (self check only) -> the G -> H -> G test hangs
+  instead of aborting; drop the self check -> the self-wait test hangs.
+- **I3 Self-sufficient helpers.** Admission is `tickets - listed + helpers < width`; a ring turn that finds a helper over the width gives its ticket
+  up (`:925-932`). Keep 6d and 6e, rewritten so the waiter is never a member. Mutants F1 and F2 of Re-check 1 must still die.
+- **I4 No lost wake.** Item end, turn end, helper leave, post and cancel wake G's parked waiters when G becomes idle or helpable. Test: a width-1
+  group with its width held by a 50 ms item and three worker waiters parked; all finish. Mutant: drop the wake on helper leave or turn end -> hangs.
+- **I5 Bounded resources.** A wait never creates a thread and inline depth on a stack is at most the number of distinct groups on its wait chain.
+  Tests: 20,000 items on G, each fanning out to its own child group and waiting on it, 1 and 4 workers: completes, the process thread count stays
+  `threads + test threads` throughout, maximum depth observed is 2 (a debug counter); a recursive chain of 500 child groups on 1 worker completes
+  under ASan. Mutant: reintroduce `spill()` above any depth -> the thread-count assertion fails.
+- **I6 Progress under random acyclic graphs.** A property test: random DAGs of 50 groups, widths 0 to 3, all three classes, items waiting on
+  random lower groups, external and worker waiters, 1, 2 and 4 workers; TSan and ASan builds separately, a watchdog, at least 2,000 iterations each.
+  Mutants I1 and I3 must make it fail.
+
+Delete with the change: `GroupState::suspended`, `quiet`, `rescuers`, `rescue_busy` (`:441-444`), `max_inline_depth` and `Here::depth`
+(`:665-669`), `spill`/`rescue` and `_rescuers` (`:950-990`, `:733`, `:1248`), the `own` branch of `helpable`, `help_own` as a wait path, the help
+of other groups' queries from `wait()` (`:1553-1559`), tests 6, 6b, 6c, 6c2 and 6f in their own-group form (rewritten as child-group cases), and
+`help_until` unless a consumer is named (none today; it has the same help-anything hazard at `:1305`).
+
+### Consumer contract (goes into `docs/API.md` and `docs/mechanisms/work-pool.md`)
+
+1. `G.wait()` returns when nothing of G is queued or running. Call it only from outside G: never from an item of G or from an item of a group
+   whose wait is on this stack. That aborts. To join work from inside a group, post it to a child group and wait on that.
+2. The wait-for graph must be acyclic: an item of G blocks only by waiting on lower groups or on bounded external events, never on a lock, flag or
+   future that its waiter, its waiter's caller, or another item of G provides. Such a block hangs in any scheduler; it is not specific to inline
+   serving.
+3. Hold no lock across `wait()` that the group's items take.
+4. Items of G may run on the waiter's thread: they must not rely on a thread identity distinct from the waiter's (recursive mutexes, thread-keyed
+   ownership) except through scopes they set themselves (strata's `off_owner_scope` does).
+5. A worker inside a wait serves G or sleeps; it serves no queries. Workers lost to waits are at most the number of concurrent waits; a host keeps
+   `reserve >= 1` for queries if waits are frequent.
+6. Event loops and coroutines never call `wait()` (`block_guard`); they join through `WorkGroup`'s idle notification (an intrusive node with a
+   `noexcept` callback run by the thread that makes the group idle, which only posts; the threadpool does not depend on the task library). Xapiand
+   wraps it as an awaitable resuming through `asio_scheduler::post()`, like `task::event`.
+7. Stack: inline depth equals the program's own nesting of group waits; each level costs the waiting item's frame plus the served item's. For
+   strata under Xapiand it is 2.
+
+### B2 and N1
+
+- **L2-B2 stays OPEN** until I1 to I6 are implemented and their tests and mutants recorded; the rescue-thread defects (EAGAIN, thread growth) close
+  by deletion. Re-check with `.scratch/arch/inversion.cc`, Re-check 1's `rescue.cc` (must now show zero threads created), and the review's
+  `stress.cc deep` (now a death test, since it is a self-wait; its child-group form must complete at N = 100,000).
+- **L2-N1 closes with the ruling.** Its shape needs two members of G waiting on G, which I2 forbids. What remains, an item that blocks on its
+  waiter's later progress, is a cycle in the wait-for graph and is covered by contract item 2. Re-check 1's lock-held-across-wait concern is item 3.
+
+### Blocking items
+
+- AL1. Implement the ruling in `work_pool.hh` with I1 to I6 and their mutants (above); update `docs/API.md` and `work-pool.md` with the contract.
+- AL2. The idle notification (contract item 6) lands in threadpool before Xapiand X2 uses it; it is not needed for strata and does not block L2 if
+  X2's first step carries it.
+
+### Conditions
+
+- AC1 (L5, strata): `executor.hh:27-33` states that `group::wait()` and `cancel()` are never called from that group's own work, and drops the line
+  about "running an index's owner on the only worker its work needs" (a worker owner now serves the work). No code change in
+  `work_pool_executor.hh`.
+- AC2 (Xapiand design, before X2): `phase7c.md` D4 replaces the own-group wait with the turn holder awaiting the group's idle notification or a
+  child group, and V2's negative test becomes "a worker waits on a child group whose work is queued only there" plus the I2 death test.
+
+Verdict: **REJECT stands for L2 (B2 open), with the design decided.** Blocking: AL1 (AL2 may move to X2's first step). Conditions: AC1, AC2.
+
+Not run: the ruling's implementation and its tests (nothing to run yet); Linux, FreeBSD and arm64; any benchmark; consumer rebuilds; the
+EAGAIN injection (taken from Re-check 1).
+
+Probes kept: `.scratch/arch/inversion.cc`, `.scratch/arch/build.sh`, `.scratch/arch/config.h` (copy of `.scratch/rc1/config.h`), binaries
+`inversion`, `inversion_tsan`.
