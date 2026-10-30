@@ -93,24 +93,22 @@ index.wait();
     wake, not for an item to end. Clamped to `threads - 1`.
   - `merge_cap` (`0`: `threads - reserve`): workers merges may hold. A worker inside a
     `wait()` serves the awaited group's items without taking a background or merge slot,
-    so the caps can be exceeded by that many waiting workers.
+    so the caps can be exceeded by that many waiting workers, and a waiting worker serves
+    no query: a host that waits often keeps `reserve >= 1`.
   - `quantum` (`100us`): service per turn; a group's turn is `quantum * weight`.
   - `name_format` (`"W{:02}"`): a `std::format` string over the worker index.
   - `merge_age` (`100ms`, `0`: never): a merge entry that has waited this long is picked
     ahead of flush entries, within `merge_cap` and the background slots.
   - `block_guard` (`nullptr`): `void (*)(const char* site) noexcept`, called when a thread
-    that is not a worker enters `WorkGroup::wait()` (site `"WorkGroup::wait"`) or
-    `help_until()` (`"WorkPool::help_until"`), before it can block. A host aborts or logs
-    there for a thread that must never wait, such as an event loop. It fires on entry,
+    that is not a worker enters `WorkGroup::wait()` (site `"WorkGroup::wait"`), before it
+    can block. A host aborts or logs there for a thread that must never wait, such as an
+    event loop (which joins a group with `on_idle()` instead). It fires on entry,
     even when the wait would return at once, and for `~WorkGroup` run on a non-worker
     (its wait), so a host's guard lets shutdown through. `sleep_until` and `~WorkPool`
     are not guarded.
 - `~WorkPool()` — runs what is queued, then joins. Every `WorkGroup` must be gone.
 - `post(WorkItem&)` — queue an item on `item.group` (the pool's own group when null), in
   `item.cls`, from any thread; never blocks, never allocates.
-- `help_until(pred)` — run the caller's own group's queued items (when called from one
-  of its items) and, on a worker, other groups' queries, until `pred()` holds; with
-  nothing to run it polls with backoff. It never runs another group's flush or merge.
 - `sleep_until(time_point, WorkGroup&) -> bool` — sleep until the deadline (`true`) or
   until the group is cancelled (`false`), in one timed futex wait.
 - `threads()`, `on_worker()`.
@@ -130,21 +128,46 @@ index.wait();
 - `cancel() -> WorkItem*` — unlink the queued items and return them through `next`,
   queries, then flushes, then merges, each oldest first; running items see
   `stop_requested()`. Items posted afterwards run normally.
-- `wait()` — until nothing is queued and nothing runs but waiters. From one of the group's
-  items, the other items of the group that are inside any `wait()` (this group's or
-  another's) count as waiters, so items that wait together, nest, or wait across groups
-  do not wait on each other, and the wait ends as soon as the group was quiet once after
-  it began; from outside, until nothing runs. On a worker it serves the group, and other
-  groups' queries, meanwhile; off the pool it parks. Serving runs queued items inline on
-  the waiter's stack, so an item that runs there must not block on the progress of the
-  waiter below it (a flag the waiter sets after `wait()`, say). Waits nest at most 64
-  deep per stack; a wait past that hands the serving to a rescue thread (one per 64
-  levels) and sleeps, and serves no other group's queries.
-- `cancel_and_wait() -> size_t`, `stop_requested()` (for the item running on this
-  thread), `set_width()`, `set_weight()`, `pool()`.
+- `wait()` — until nothing is queued and nothing runs. On a worker the caller serves the
+  group meanwhile, inline on its own stack, as a helper within `width`, and nothing else:
+  no other group's items and no query. Off the pool it parks. A wait creates no thread.
+  The contract is in "Waiting" below.
+- `on_idle(WorkIdle&)`, `cancel_idle(WorkIdle&) -> bool` — the way for a thread that must
+  not block (an event loop, a coroutine) to join a group. `WorkIdle` is a caller-owned
+  node with a `noexcept` callback `fn(WorkIdle*)`; `on_idle` links it, and the callback
+  runs once, on the thread that makes the group idle (nothing queued, nothing running), or
+  at once on the calling thread when the group already is. It only posts (resumes a
+  coroutine, wakes a loop) and never blocks; it may free its node. `cancel_idle` unlinks
+  a node that has not fired and returns `false` when it did. No `block_guard`: it never
+  waits. Which node fires first is unspecified.
+- `cancel_and_wait() -> size_t`, `stop_requested()` (for the innermost item of this group
+  on this thread's stack), `set_width()`, `set_weight()`, `pool()`.
 - `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are
-  left to their owner, who calls `cancel()` first to get them back), then wait. It may
-  run from one of the group's own items.
+  left to their owner, who calls `cancel()` first to get them back), then wait. From one
+  of the group's own items it aborts, as `wait()` does.
+
+#### Waiting
+
+1. `G.wait()` returns when nothing of G is queued or running. Call it from outside G:
+   never from an item of G, nor from an item of a group whose wait is on this stack.
+   `wait()`, `cancel_and_wait()` and `~WorkGroup` on a group that has an item on the
+   calling thread's stack (its own group included) print the site and `std::abort()` in
+   every build. To join work from inside a group, post it to a child group and wait on
+   that.
+2. The wait-for graph must be acyclic: an item of G blocks only by waiting on lower
+   groups or on bounded external events, never on a lock, flag or future that its waiter,
+   its waiter's caller, or another item of G provides. That hangs in any scheduler.
+3. Hold no lock across `wait()` that the group's items take.
+4. Items of G may run on the waiter's thread: they must not rely on a thread identity
+   distinct from the waiter's (recursive mutexes, thread-keyed ownership) except through
+   scopes they set themselves.
+5. A worker inside a wait serves G or sleeps; it serves no query and takes no background
+   slot. Workers lost to waits are at most the number of concurrent waits.
+6. Event loops and coroutines never call `wait()` (`block_guard`); they join through
+   `on_idle()`.
+7. Stack: inline depth is the program's own nesting of group waits, at most the number of
+   distinct groups on a wait chain; each level costs the waiting item's frame plus the
+   served item's. Nothing caps it and nothing spills to another thread.
 
 ### `WorkItem`
 

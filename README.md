@@ -31,8 +31,8 @@ caller-owned item allocates nothing, and idle workers sleep on a futex.
 - **`WorkPool` and `WorkGroup`** (`work_pool.hh`): per-group FIFOs served by deficit
   round robin, so one group alone fans out to every worker and many busy groups share
   them equally; three classes (`query`, `flush`, `merge`) with workers reserved for
-  queries; `cancel()` that hands the queue back; waits that serve the group instead of
-  blocking a worker; Tokio's idle protocol over one futex per worker.
+  queries; `cancel()` that hands the queue back; waits that serve the awaited group instead of
+  blocking a worker, and an idle notification for loops and coroutines; Tokio's idle protocol over one futex per worker.
 
 ## 📦 Installation
 

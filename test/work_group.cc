@@ -172,21 +172,22 @@ int main() {
 		std::printf("work_group OK: cancel() handed back %zu queued items in order; the running one saw stop\n", dropped);
 	}
 
-	// ---- 6. wait() from the group's own item helps, even on a one-worker pool. ----
+	// ---- 6. wait() from an item on a child group serves it, even on a one-worker pool. ----
 	{
 		WorkPool pool({.threads = 1});
 		WorkGroup group(pool);
+		WorkGroup halves_group(pool);
 		std::atomic<int> halves{0};
 		std::atomic<bool> done{false};
 		group.enqueue([&] {
-			group.enqueue([&] { halves.fetch_add(1); });
-			group.enqueue([&] { halves.fetch_add(1); });
-			group.wait();  // waits for the halves, not for itself
+			halves_group.enqueue([&] { halves.fetch_add(1); });
+			halves_group.enqueue([&] { halves.fetch_add(1); });
+			halves_group.wait();  // waits for the halves, in a group of their own
 			done = halves.load() == 2;
 		});
 		spin_until([&] { return done.load(); });
 		group.wait();
-		std::printf("work_group OK: a wait inside the group's own item ran its halves inline\n");
+		std::printf("work_group OK: a wait on a child group ran its halves inline\n");
 	}
 
 	// ---- 7. wait() on another group from a worker serves that group. ----
@@ -237,17 +238,20 @@ int main() {
 		std::printf("work_group OK: the destructor freed 10 queued boxes unrun and waited for the running one\n");
 	}
 
-	// ---- 9. A group destroyed from its own item. ----
+	// ---- 9. A group destroyed from an item of another group (from its own item aborts:
+	// test/work_wait.cc). ----
 	{
 		WorkPool pool({.threads = 2});
+		WorkGroup owner(pool);
 		std::atomic<bool> done{false};
 		auto* group = new WorkGroup(pool);
-		group->enqueue([group, &done] {
+		owner.enqueue([group, &done] {
 			delete group;
 			done = true;
 		});
 		spin_until([&] { return done.load(); });
-		std::printf("work_group OK: a group destroyed itself from its own item\n");
+		owner.wait();
+		std::printf("work_group OK: a group was destroyed from another group's item\n");
 	}
 
 	// ---- 10. sleep_until: the deadline returns true; a cancel ends it early with false. ----

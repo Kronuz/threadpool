@@ -20,9 +20,10 @@ threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (sta
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
 test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
-test/work_pool.cc             WorkPool tests: delivery, reposts, help_until, draining, ping-pong, idle CPU.
+test/work_pool.cc             WorkPool tests: delivery, reposts, a child-group wait, draining, ping-pong, idle CPU.
 test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
-test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 waits, concurrent waits, the V5 guard.
+test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 child-group waits, the V5 guard.
+test/work_wait.cc             Waits: abort on a stack cycle, inversion, width, wake, resources, random acyclic graphs; on_idle.
 docs/mechanisms/work-pool.md  How WorkPool works, why, and what guards each invariant.
 bench/                        kernel_time.cc (THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
@@ -115,10 +116,11 @@ name is `threadpool`.
   `Idle::notify_one`, the half of the lost-wakeup pair the parker's final check relies on.
   Workers never sleep on a timer or on `std::atomic::wait`. A merge ring entry carries its
   push time (the other rings carry 0); `head_stamp()` peeks it racily, which at worst
-  repeats or delays one promotion. `GroupState::suspended` counts running items inside
-  `wait()`, own group or another; every path out of `wait()` must decrement it. A rescue
-  thread counts as a reference of its group's state (`rescuers`), and `~WorkPool` waits for
-  them to exit.
+  repeats or delays one promotion. A `wait()` serves only the group it waits on and creates
+  no thread; `tls_here.top` is the chain of items on this stack, and a wait on a group in
+  it aborts. Every change that makes a group idle or helpable (turn end, post, cancel)
+  bumps `_group_wake` under the group lock when `waiters` is non-zero, and a turn that ends
+  idle fires the group's `on_idle` nodes after unlocking.
 
 ## How to extend
 

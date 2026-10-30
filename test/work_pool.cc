@@ -1,4 +1,4 @@
-// Tests for WorkPool: every item runs once, reposts from workers, help_until, the draining
+// Tests for WorkPool: every item runs once, reposts from workers, a worker waiting on a child group, the draining
 // destructor, idle CPU, and a ping-pong that hangs on a lost wakeup.
 // Build: c++ -std=c++20 -I.. work_pool.cc ../thread.cc -o work_pool && ./work_pool
 #include <atomic>
@@ -14,6 +14,13 @@
 #include "work_pool.hh"
 
 namespace {
+
+template <typename Pred>
+void spin_until(Pred&& pred) {
+	while (!pred()) {
+		std::this_thread::sleep_for(std::chrono::microseconds(200));
+	}
+}
 
 struct Counted : WorkItem {
 	std::atomic<std::uint64_t>* count = nullptr;
@@ -57,7 +64,7 @@ int main() {
 			for (auto& t : threads) {
 				t.join();
 			}
-			pool.help_until([&] { return count.load() == producers * per; });
+			spin_until([&] { return count.load() == producers * per; });
 		}
 		assert(count.load() == producers * per);
 		std::printf("work_pool OK: %u items from %u producers ran once each\n", producers * per, producers);
@@ -94,34 +101,27 @@ int main() {
 		std::printf("work_pool OK: a chain of 10000 reposts ran on the workers\n");
 	}
 
-	// ---- 3. help_until inside an item on a one-worker pool runs the children itself. ----
+	// ---- 3. A wait inside an item on a one-worker pool serves the child group itself. ----
 	{
-		struct Parent : WorkItem {
-			WorkPool* pool;
-			std::atomic<std::uint64_t> children{0};
-			std::vector<Counted> kids;
-			std::atomic<bool> done{false};
-		};
 		WorkPool pool({.threads = 1});
-		Parent parent;
-		parent.pool = &pool;
-		parent.kids.resize(100);
-		parent.run = [](WorkItem* w) noexcept {
-			auto* p = static_cast<Parent*>(w);
-			for (auto& k : p->kids) {
+		WorkGroup parent(pool);
+		WorkGroup kids(pool);
+		std::atomic<std::uint64_t> children{0};
+		std::vector<Counted> items(100);
+		std::atomic<bool> done{false};
+		parent.enqueue([&] {
+			for (auto& k : items) {
 				k.run = count_one;
-				k.count = &p->children;
-				p->pool->post(k);
+				k.count = &children;
+				kids.post(k);
 			}
 			// The only worker is this one: without helping, this would deadlock.
-			p->pool->help_until([p] { return p->children.load() == p->kids.size(); });
-			p->done.store(true, std::memory_order_release);
-		};
-		pool.post(parent);
-		while (!parent.done.load(std::memory_order_acquire)) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-		std::printf("work_pool OK: a nested wait on a one-worker pool helped instead of blocking\n");
+			kids.wait();
+			done.store(children.load() == items.size(), std::memory_order_release);
+		});
+		spin_until([&] { return done.load(std::memory_order_acquire); });
+		parent.wait();
+		std::printf("work_pool OK: a wait on a child group on a one-worker pool helped instead of blocking\n");
 	}
 
 	// ---- 4. The destructor runs everything queued before it. ----
@@ -171,7 +171,7 @@ int main() {
 			item.count = &count;
 			pool.post(item);
 		}
-		pool.help_until([&] { return count.load() == items.size(); });
+		spin_until([&] { return count.load() == items.size(); });
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		auto c0 = cpu_ns();
 		std::this_thread::sleep_for(std::chrono::milliseconds(500));

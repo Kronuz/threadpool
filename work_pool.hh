@@ -30,6 +30,8 @@
 #include <atomic>                // for std::atomic
 #include <chrono>                // for std::chrono
 #include <cstddef>               // for std::size_t
+#include <cstdio>                // for std::fprintf
+#include <cstdlib>               // for std::abort
 #include <cstdint>               // for std::uint32_t, std::uint64_t, std::int64_t
 #include <format>                // for std::vformat, std::make_format_args
 #include <memory>                // for std::unique_ptr
@@ -93,6 +95,16 @@ struct WorkItem {
 
 	// Whether the item's group was cancelled after the item started; call it from run.
 	bool stop_requested() const noexcept;
+};
+
+
+// A one-shot idle notification, owned by the caller: WorkGroup::on_idle() links it, and fn
+// runs once, on the thread that makes the group idle (nothing queued, nothing running), or on
+// the calling thread when the group already is. fn runs inside the scheduler, so it only
+// posts (resumes a coroutine, wakes a loop) and never blocks; it may free the node.
+struct WorkIdle {
+	void (*fn)(WorkIdle*) noexcept = nullptr;
+	WorkIdle* next = nullptr;    // the pool's while linked
 };
 
 
@@ -437,11 +449,8 @@ struct alignas(64) GroupState {
 	SpinLock mu;
 	Lane lanes[classes];         // under mu, by WorkClass
 	std::uint32_t running = 0;   // items executing, under mu
-	std::uint32_t waiters = 0;   // threads in WorkGroup::wait(), under mu
-	std::uint32_t suspended = 0; // running items of this group inside its wait(), under mu
-	std::uint32_t quiet = 0;     // bumped when an item's wait() sees the group quiet, under mu
-	std::uint32_t rescuers = 0;  // rescue threads serving this group for deep waiters, under mu
-	std::uint32_t rescue_busy = 0;  // of those, inside an item, under mu
+	std::uint32_t waiters = 0;   // threads parked in WorkGroup::wait(), under mu
+	WorkIdle* idle = nullptr;    // on_idle() notifications not yet fired, under mu
 	unsigned width = 0;          // under mu; per class, 0: no cap
 	unsigned weight = 1;         // quanta per turn, under mu
 	bool owned = true;           // under mu; false once the WorkGroup is gone
@@ -458,7 +467,7 @@ struct alignas(64) GroupState {
 				return false;
 			}
 		}
-		return rescuers == 0;
+		return true;
 	}
 };
 
@@ -658,15 +667,27 @@ public:
 
 // What runs on this thread. One thread_local, so a worker resolves it once per item
 // (macOS reaches each thread_local through a call).
-struct Here {
-	const WorkPool* pool = nullptr;   // the pool whose worker this is
-	GroupState* state = nullptr;      // the group of the item running here
-	WorkItem* item = nullptr;         // the item running here
-	unsigned depth = 0;               // waits serving items inline on this stack
+// One item running on this thread's stack; run_item() links it, innermost first.
+struct Frame {
+	GroupState* state;
+	WorkItem* item;
+	const Frame* parent;
 };
 
-// How many waits may nest on one stack before the next one hands its help to a rescue thread.
-inline constexpr unsigned max_inline_depth = 64;
+struct Here {
+	const WorkPool* pool = nullptr;   // the pool whose worker this is
+	const Frame* top = nullptr;       // the innermost item running here
+
+	// The innermost item of group s on this stack, or null.
+	const Frame* find(const GroupState* s) const noexcept {
+		for (const Frame* f = top; f; f = f->parent) {
+			if (f->state == s) {
+				return f;
+			}
+		}
+		return nullptr;
+	}
+};
 
 inline thread_local Here tls_here;
 
@@ -730,7 +751,6 @@ private:
 	alignas(64) std::atomic<unsigned> _busy_bg{0};     // workers in flush or merge turns
 	alignas(64) std::atomic<unsigned> _busy_merge{0};  // workers in merge turns
 	alignas(64) std::atomic<unsigned> _extras[threadpool_detail::classes] = {};  // tickets beyond each lane's first; each at most _n
-	alignas(64) std::atomic<unsigned> _rescuers{0};    // rescue threads running
 	alignas(64) std::atomic<std::uint64_t> _aged{0};   // merge turns picked ahead of flush for their age
 	alignas(64) std::atomic<std::size_t> _states{1};   // group states alive, the pool's own included
 	alignas(64) std::atomic<std::uint32_t> _group_wake{0};  // WorkGroup::wait()'s futex word
@@ -800,14 +820,39 @@ private:
 		}
 	}
 
-	// Under s.mu, after an item finished or a cancel: wakes wait() callers that may be done.
+	// Under s.mu: whether the group has nothing queued and nothing running.
+	static bool idle(const GroupState& s) noexcept {
+		return s.pending() == 0 && s.running == 0;
+	}
+
+	// Under s.mu, after a turn ended or a cancel: whether a parked wait() of s has something
+	// to do, because the group is idle or a helper may serve a lane now. Bumps the word the
+	// waiters sleep on; the caller wakes them after unlocking.
 	bool waiters_due(GroupState& s) noexcept {
-		if (s.waiters && s.pending() == 0 && s.running <= (s.suspended ? s.suspended : 1)) {
+		if (s.waiters && (idle(s) || helpable(s) >= 0)) {
 			// release: under s.mu anyway; the futex compares the word.
 			_group_wake.fetch_add(1, std::memory_order_release);
 			return true;
 		}
 		return false;
+	}
+
+	// Under s.mu: detaches the idle notifications of a group that is idle, to run unlocked.
+	static WorkIdle* take_idle(GroupState& s) noexcept {
+		WorkIdle* list = nullptr;
+		if (s.idle && idle(s)) {
+			list = s.idle;
+			s.idle = nullptr;
+		}
+		return list;
+	}
+
+	static void fire_idle(WorkIdle* list) noexcept {
+		while (list) {
+			WorkIdle* next = list->next;  // fn may free the node
+			list->fn(list);
+			list = next;
+		}
 	}
 
 	// After unlocking s: what its critical section decided. The common case is inline.
@@ -840,13 +885,10 @@ private:
 
 	// `here` is this thread's tls_here, resolved once by the caller (per turn, not per item).
 	static void run_item(threadpool_detail::Here& here, GroupState& s, WorkItem* item) noexcept {
-		auto* prev_state = here.state;
-		auto* prev_item = here.item;
-		here.state = &s;
-		here.item = item;
+		threadpool_detail::Frame frame{&s, item, here.top};
+		here.top = &frame;
 		item->run(item);
-		here.state = prev_state;
-		here.item = prev_item;
+		here.top = frame.parent;
 	}
 
 	// Under s.mu with a ticket of lane c held (a ring ticket, or a helper's): one turn, a
@@ -856,7 +898,6 @@ private:
 		Lane& l = s.lanes[c];
 		std::int64_t budget = l.deficit + _quantum * s.weight;
 		l.deficit = 0;
-		bool wake = false;
 		auto& here = threadpool_detail::tls_here;
 		auto t = threadpool_detail::ticks();
 		while (budget > 0) {
@@ -874,7 +915,6 @@ private:
 			t = now;
 			s.mu.lock();
 			--s.running;
-			wake |= waiters_due(s);
 		}
 		bool push = false;
 		bool extra = false;
@@ -910,9 +950,14 @@ private:
 				}
 			}
 		}
+		bool wake = waiters_due(s);
+		WorkIdle* notify = take_idle(s);
 		bool free = !s.owned && s.unreferenced();
 		s.mu.unlock();
 		release(&s, c, push, extra, wake, free);
+		if (notify) [[unlikely]] {
+			fire_idle(notify);
+		}
 	}
 
 	// A ring entry of class c: one listed ticket of s.
@@ -932,61 +977,17 @@ private:
 		turn(s, c, false);
 	}
 
-	// Under s.mu: the lane a waiting worker may serve, or -1. From the group's own item it
-	// runs any queued item inline; otherwise it serves as a helper while fewer than `width`
-	// turns of the lane are being served (tickets still on the ring do not count).
-	static int helpable(const GroupState& s, bool own) noexcept {
+	// Under s.mu: the lane a waiting worker may serve as a helper, or -1: one with queued
+	// items while fewer than `width` turns of it are being served (tickets still on the ring
+	// do not count).
+	static int helpable(const GroupState& s) noexcept {
 		for (unsigned c = 0; c < threadpool_detail::classes; ++c) {
 			const auto& l = s.lanes[c];
-			if (l.pending && (own || !s.width || l.tickets - l.listed + l.helpers < s.width)) {
+			if (l.pending && (!s.width || l.tickets - l.listed + l.helpers < s.width)) {
 				return static_cast<int>(c);
 			}
 		}
 		return -1;
-	}
-
-	// Serves s for a waiter that is too deep on its stack to help inline: a fresh thread
-	// runs the lanes the waiter could, until none can be served. False if no thread starts.
-	bool spill(GroupState* s, bool own) noexcept {
-		_rescuers.fetch_add(1, std::memory_order_relaxed);
-		try {
-			std::thread([this, s, own] { rescue(s, own); }).detach();
-			return true;
-		} catch (...) {
-			_rescuers.fetch_sub(1, std::memory_order_relaxed);
-			return false;
-		}
-	}
-
-	void rescue(GroupState* s, bool own) noexcept {
-		auto& here = threadpool_detail::tls_here;
-		here.pool = this;
-		here.state = own ? s : nullptr;
-		here.depth = 0;
-		for (;;) {
-			s->mu.lock();
-			int c = helpable(*s, own);
-			if (c < 0) {
-				--s->rescuers;
-				bool free = !s->owned && s->unreferenced();
-				s->mu.unlock();
-				release(s, flush, false, false, false, free);
-				break;
-			}
-			++s->rescue_busy;
-			if (own) {
-				s->mu.unlock();
-				help_own();
-			} else {
-				++s->lanes[c].helpers;
-				turn(*s, static_cast<unsigned>(c), true);
-			}
-			s->mu.lock();
-			--s->rescue_busy;
-			s->mu.unlock();
-		}
-		here = {};
-		_rescuers.fetch_sub(1, std::memory_order_release);
 	}
 
 	// The background slots a worker holds, kept across consecutive flush and merge turns
@@ -1096,52 +1097,6 @@ private:
 		return _busy_merge.load(std::memory_order_seq_cst) < _merge_cap && !_ready[merge].empty();
 	}
 
-	// Runs one queued item of the caller's own group inline, queries first; false when
-	// there is none.
-	bool help_own() noexcept {
-		auto& here = threadpool_detail::tls_here;
-		GroupState* s = here.state;
-		if (!s) {
-			return false;
-		}
-		s->mu.lock();
-		WorkItem* item = nullptr;
-		for (auto& l : s->lanes) {
-			if ((item = l.pop())) {
-				break;
-			}
-		}
-		if (!item) {
-			s->mu.unlock();
-			return false;
-		}
-		++s->running;
-		item->epoch = s->epoch.load(std::memory_order_relaxed);
-		s->mu.unlock();
-		run_item(here, *s, item);
-		s->mu.lock();
-		--s->running;
-		bool wake = waiters_due(*s);
-		s->mu.unlock();
-		if (wake) {
-			threadpool_detail::futex_wake_all(&_group_wake);
-		}
-		return true;
-	}
-
-	// On a worker: serves one turn of another group's queries; false when none waits.
-	bool help_query() noexcept {
-		if (!on_worker()) {
-			return false;
-		}
-		GroupState* s = _ready[query].pop();
-		if (!s) {
-			return false;
-		}
-		serve(*s, query);
-		return true;
-	}
-
 	// Parks worker idx after it found nothing; false once the pool is stopping.
 	bool park(unsigned idx, bool& searching) noexcept {
 		if (_stop.load(std::memory_order_acquire)) {
@@ -1244,10 +1199,6 @@ public:
 	// and only the pool's own items may post once the destructor starts.
 	~WorkPool() noexcept {
 		stop_and_join();
-		unsigned round = 0;
-		while (_rescuers.load(std::memory_order_acquire)) {
-			threadpool_detail::backoff(round);
-		}
 	}
 
 	unsigned threads() const noexcept { return _n; }
@@ -1289,25 +1240,6 @@ public:
 		}
 		s.mu.unlock();
 		release(&s, c, push, false, wake, false);
-	}
-
-	// Runs the caller's own group's queued items (when called from one of its items) and,
-	// on a worker, other groups' queries, until pred() holds, so a nested wait never
-	// blocks a worker on work it could do itself. It never runs another group's flush or
-	// merge items. With nothing to run it polls with backoff.
-	template <typename Pred>
-	void help_until(Pred&& pred) {
-		if (_block_guard && !on_worker()) {
-			_block_guard("WorkPool::help_until");
-		}
-		unsigned round = 0;
-		while (!pred()) {
-			if (help_own() || help_query()) {
-				round = 0;
-			} else {
-				threadpool_detail::backoff(round);
-			}
-		}
 	}
 
 	// Sleeps until deadline, returning true, or until group is cancelled, returning false
@@ -1354,6 +1286,14 @@ class WorkGroup {
 		static void drop(BoxedItem* b) noexcept { delete static_cast<Box*>(b); }
 	};
 
+	// A wait on a group with an item on this thread's stack can only wait for itself.
+	void check_stack(const char* site) const noexcept {
+		if (threadpool_detail::tls_here.find(_s)) {
+			std::fprintf(stderr, "threadpool: %s on a group that has an item on this thread's stack (a wait inside its own group, or a cycle of waits); post the work to a child group and wait on that\n", site);
+			std::abort();
+		}
+	}
+
 public:
 	explicit WorkGroup(WorkPool& pool, unsigned width = 0, unsigned weight = 1) :
 		_pool(&pool),
@@ -1374,8 +1314,10 @@ public:
 	WorkGroup& operator=(const WorkGroup&) = delete;
 
 	// Cancels (freeing queued boxed items; the owner keeps its own), then waits for the
-	// running ones. Must not race other calls, except from the group's own running items.
+	// running ones, as wait() does: aborts when called from an item of this group. Must not
+	// race other calls.
 	~WorkGroup() noexcept {
+		check_stack("WorkGroup::~WorkGroup");
 		for (WorkItem* item = cancel(); item;) {
 			WorkItem* next = item->next;
 			if (item->flags & threadpool_detail::item_boxed) {
@@ -1443,133 +1385,42 @@ public:
 		// release: a sleeper that sees the new word sees the new epoch.
 		_s->sleep.fetch_add(1, std::memory_order_release);
 		bool wake = _pool->waiters_due(*_s);
+		WorkIdle* notify = WorkPool::take_idle(*_s);
 		_s->mu.unlock();
 		threadpool_detail::futex_wake_all(&_s->sleep);
 		if (wake) {
 			threadpool_detail::futex_wake_all(&_pool->_group_wake);
 		}
+		WorkPool::fire_idle(notify);
 		return list;
 	}
 
-	// Blocks until the group has nothing queued and nothing running but waiters: the caller
-	// and the group's other items inside their own wait() when called from one of its items,
-	// so nested and concurrent waits of one group cannot deadlock each other; from outside,
-	// until nothing runs. A wait called from an item returns as soon as the group was quiet
-	// once after it began, even if an item that left its own wait earlier runs again. On a
-	// worker it serves the group meanwhile, and other groups' queries, so a wait cannot
-	// deadlock on queued work; off the pool it parks. Serving inline nests on the worker's
-	// stack, so a wait already max_inline_depth deep hands the serving to a rescue thread
-	// and sleeps (and serves no other group's queries).
+	// Blocks until the group has nothing queued and nothing running. On a worker the caller
+	// serves the group meanwhile, inline, as a helper within the group's width, and nothing
+	// else (no other group's work, no query); anywhere else it parks. It creates no thread.
+	// A wait on a group that has an item on the calling thread's stack, this group included,
+	// is a programming error and aborts: to join work from inside a group, post it to a child
+	// group and wait on that. Items of the group may run on the waiter's thread.
 	void wait() noexcept {
+		check_stack("WorkGroup::wait");
 		auto& pool = *_pool;
 		GroupState* s = _s;
-		auto& here = threadpool_detail::tls_here;
-		GroupState* mine = here.state;  // the group of the item calling, if it is one
-		bool own = mine == s;
 		bool worker = pool.on_worker();
 		if (!worker && pool._block_guard) {
 			pool._block_guard("WorkGroup::wait");
 		}
-		// A group is quiet when nothing is queued and every running item is a waiter: inside
-		// a wait() of this group or of another (the item below another on a stack counts, or
-		// the inner one would wait for it forever).
-		std::uint32_t epoch = 0;
-		if (mine) {
-			mine->mu.lock();
-			++mine->suspended;
-			epoch = mine->quiet;
-			bool due = pool.waiters_due(*mine);
-			mine->mu.unlock();
-			if (due) {
-				threadpool_detail::futex_wake_all(&pool._group_wake);
-			}
-		}
-		struct Resume {
-			GroupState* mine;
-			~Resume() {
-				if (mine) {
-					mine->mu.lock();
-					--mine->suspended;
-					mine->mu.unlock();
-				}
-			}
-		} resume{mine};
-		// Under s->mu: whether this wait is over. An item's wait that finds the group quiet
-		// bumps `quiet` and wakes the others, whose waits end with it.
-		auto done = [&](bool& wake) {
-			if (own && s->quiet != epoch) {
-				return true;
-			}
-			if (s->pending() != 0 || s->running != (own ? s->suspended : 0)) {
-				return false;
-			}
-			if (own) {
-				++s->quiet;
-				if (s->waiters) {
-					pool._group_wake.fetch_add(1, std::memory_order_release);
-					wake = true;
-				}
-			}
-			return true;
-		};
 		for (;;) {
-			// acquire: pairs with waiters_due()'s increment, made under s->mu.
+			// acquire: pairs with the bump made under s->mu by whatever changed the group.
 			auto word = pool._group_wake.load(std::memory_order_acquire);
-			bool wake = false;
 			s->mu.lock();
-			if (done(wake)) {
+			if (WorkPool::idle(*s)) {
 				s->mu.unlock();
-				if (wake) {
-					threadpool_detail::futex_wake_all(&pool._group_wake);
-				}
 				return;
 			}
-			int c = worker ? WorkPool::helpable(*s, own) : -1;
-			bool deep = here.depth >= threadpool_detail::max_inline_depth;
-			if (c >= 0 && !deep) {
-				++here.depth;
-				if (own) {
-					s->mu.unlock();
-					pool.help_own();
-				} else {
-					++s->lanes[c].helpers;
-					pool.turn(*s, static_cast<unsigned>(c), true);
-				}
-				--here.depth;
-				continue;
-			}
-			// A rescue thread that is not inside an item is on its way to serve; the others
-			// are as deep as this waiter, or deeper.
-			bool spawn = c >= 0 && s->rescuers == s->rescue_busy;
-			if (spawn) {
-				++s->rescuers;
-			}
-			s->mu.unlock();
-			if (spawn && !pool.spill(s, own)) {
-				s->mu.lock();
-				--s->rescuers;
-				s->mu.unlock();
-			}
-			if (worker && !deep) {
-				++here.depth;
-				bool helped = pool.help_query();
-				--here.depth;
-				if (helped) {
-					continue;
-				}
-			}
-			s->mu.lock();
-			// Checked again where the waiter registers: a group that went quiet, or work
-			// that came in, since the first look is not slept through.
-			if (done(wake)) {
-				s->mu.unlock();
-				if (wake) {
-					threadpool_detail::futex_wake_all(&pool._group_wake);
-				}
-				return;
-			}
-			if (!deep && worker && WorkPool::helpable(*s, own) >= 0) {
-				s->mu.unlock();
+			int c = worker ? WorkPool::helpable(*s) : -1;
+			if (c >= 0) {
+				++s->lanes[c].helpers;
+				pool.turn(*s, static_cast<unsigned>(c), true);
 				continue;
 			}
 			++s->waiters;
@@ -1581,7 +1432,39 @@ public:
 		}
 	}
 
+	// Runs node->fn once when the group is idle (nothing queued, nothing running): on the
+	// thread that makes it idle, or here and now when it already is. The way for an event
+	// loop or a coroutine to join a group: it never blocks, so it needs no block_guard.
+	void on_idle(WorkIdle& node) noexcept {
+		_s->mu.lock();
+		bool now = WorkPool::idle(*_s);
+		if (!now) {
+			node.next = _s->idle;
+			_s->idle = &node;
+		}
+		_s->mu.unlock();
+		if (now) {
+			node.fn(&node);
+		}
+	}
+
+	// Unlinks a notification that has not fired; false when it already fired or is firing.
+	bool cancel_idle(WorkIdle& node) noexcept {
+		_s->mu.lock();
+		bool found = false;
+		for (WorkIdle** link = &_s->idle; *link; link = &(*link)->next) {
+			if (*link == &node) {
+				*link = node.next;
+				found = true;
+				break;
+			}
+		}
+		_s->mu.unlock();
+		return found;
+	}
+
 	std::size_t cancel_and_wait() noexcept {
+		check_stack("WorkGroup::cancel_and_wait");
 		std::size_t dropped = 0;
 		for (WorkItem* item = cancel(); item; item = item->next) {
 			++dropped;
@@ -1592,8 +1475,8 @@ public:
 
 	// Whether the item running on this thread belongs to this group and saw a cancel.
 	bool stop_requested() const noexcept {
-		auto* item = threadpool_detail::tls_here.item;
-		return item && threadpool_detail::tls_here.state == _s && item->stop_requested();
+		auto* frame = threadpool_detail::tls_here.find(_s);
+		return frame && frame->item->stop_requested();
 	}
 
 	void set_width(unsigned width) noexcept {
@@ -1628,8 +1511,8 @@ inline bool
 WorkPool::sleep_until(std::chrono::steady_clock::time_point deadline, WorkGroup& group) noexcept
 {
 	GroupState* s = group._s;
-	auto* item = threadpool_detail::tls_here.item;
-	auto started = item && threadpool_detail::tls_here.state == s ? item->epoch : s->epoch.load(std::memory_order_relaxed);
+	auto* frame = threadpool_detail::tls_here.find(s);
+	auto started = frame ? frame->item->epoch : s->epoch.load(std::memory_order_relaxed);
 	for (;;) {
 		// acquire: pairs with cancel()'s release of the word, so a new word means a new epoch.
 		auto word = s->sleep.load(std::memory_order_acquire);

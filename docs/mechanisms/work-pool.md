@@ -41,19 +41,19 @@ pool uses no CPU.
 - **Parse-ahead and other bulk work get their own group.** Groups take turns; one group's lane
   is a FIFO. A restore's parse-ahead in the index's own group would delay the index's refresh
   behind the whole backlog, in its own group it waits one turn.
-- **Waiting.** `WorkGroup::wait()` on a worker serves the group (inline from one of its items,
-  else as a helper within the width) and other groups' queries; off the pool it parks on a
-  futex. The group is quiet when nothing is queued and every running item is itself inside a
-  `wait()`, of this group or of another (`GroupState::suspended`), and the first wait to find
-  it quiet bumps an epoch that ends the others' waits, so items that wait together, nested,
-  or across groups end instead of waiting on each other. A width-capped group admits a helper
-  while fewer than `width` turns are being served (ring tickets not yet served do not count),
-  and a ring turn that finds a helper in its place gives its ticket up, so the width holds.
-  Inline serving nests on the worker's stack: at 64 nested waits the next hands its serving to
-  a rescue thread (a fresh stack, one more thread per 64 levels) and sleeps. Items served inline
-  sit on the waiter's stack, so one must not block on the waiter's progress. A thread that is not a
-  worker first calls `Options::block_guard(site)` (also `help_until`), where a host aborts for
-  an event loop: a loop that waits for a pool whose work needs the loop waits for itself.
+- **Waiting.** `WorkGroup::wait()` returns when nothing of the group is queued or running.
+  On a worker it serves only that group, inline, as a helper while fewer than `width` turns
+  of a lane are being served (ring tickets not yet served do not count), and a ring turn
+  that finds a helper in its place gives its ticket up, so the width holds. It serves no
+  other group's work and no query, and it creates no thread; with nothing to serve it parks
+  on a futex, woken when the group goes idle or a lane becomes helpable. `tls_here.top` is
+  the chain of items on the stack: a wait (or `~WorkGroup`) on a group already in it
+  aborts, so a wait never waits for work below it on its own stack. Inline depth is the
+  program's own nesting of group waits. A thread that is not a worker first calls
+  `Options::block_guard(site)`, where a host aborts for an event loop.
+- **Idle notification.** `on_idle(WorkIdle&)` links a caller-owned node whose `noexcept`
+  callback runs once on the thread that makes the group idle (or at once if it already is):
+  an event loop or a coroutine joins a group without `wait()`. The callback only posts.
 - **Idle.** Tokio's protocol over one untimed futex per worker (`futex(2)`,
   `os_sync_wait_on_address`, `_umtx_op`): a post wakes a sleeper only when nobody searches, the
   last searcher wakes the next, the last to park checks the rings again.
@@ -76,12 +76,29 @@ for T" rule serves one entry per interval and leaves a backlog of overdue merges
 - Background turns never exceed `threads - reserve`, merges never `merge_cap`, aged ones
   included (`test/work_scheduling.cc` cases 2 and 3; mutants that bypass either die). A
   worker inside a `wait()` serves the awaited group without a slot, so waiting workers can
-  add to both.
+  add to both, and serves no query, so a host that waits keeps `reserve >= 1`.
 - A merge older than `merge_age` runs under a flood of flushes (case 1, with its control).
-- `wait()` ends when only waiters run (cases 6, 6b, 6c, 6c2); a width-capped group is served
-  by waiters at 1, 2 and 4 threads and keeps its width (6d, 6e); 20,000 self-waiting items
-  and a 300-group wait chain finish on one worker (6f); a non-worker's `wait()` and
-  `help_until()` reach the guard before blocking (case 7).
+- Progress. Take the wait-for graph acyclic (an item of P may wait on G only for G
+  below P; an item blocks only through `wait()` on a lower group or a bounded external
+  event). Then every `wait()` returns: take a non-returning `wait(G)` with G of least
+  height. Every running item of G finishes, since above it on its stack sit only its own
+  wait on a lower group and that group's items (I1, I2) and those return by minimality.
+  Queued items of G get served, since a worker waiter is admitted whenever fewer than
+  `width` turns of G are being served (I3) and woken when that changes (I4). So a worker's
+  wait never needs another free worker, every worker returns to its loop, and a
+  non-worker's ring ticket is popped.
+- I1 help scope: a wait runs only items of its group (`test/work_wait.cc`, the Q -> G -> H
+  inversion at 1, 2 and 4 workers, with a recorder and a thread-local a query must not
+  see). I2 no wait on the calling stack: death tests for a self-wait, `~WorkGroup` and
+  `cancel_and_wait` from the group's own item, and G -> H -> G. I3 self-sufficient
+  helpers: workers waiting on a width-capped group at 1, 2 and 4 threads keep the width.
+  I4 no lost wake: three parked waiters on a width-1 group wake when it goes idle. I5
+  bounded resources: 20,000 fan-out waits keep the process thread count and the deepest
+  stack at two items; a 500-group chain finishes on one worker. I6: random acyclic graphs
+  of 50 groups finish with every width held. Each has a mutant that dies
+  (`docs/status/phase7c-l2.md`).
+- A non-worker's `wait()` reaches the guard before blocking (`test/work_scheduling.cc`
+  case 7); `on_idle` needs none.
 
 ## Numbers
 
@@ -90,5 +107,5 @@ K1 to K3 reruns, the sanitizer runs and the consumer builds are in
 
 ## Code
 
-`work_pool.hh`: `ReadyRing` (stamps), `WorkPool::pick`, `merge_overdue`, `WorkGroup::wait`.
-Tests: `test/work_pool.cc`, `test/work_group.cc`, `test/work_scheduling.cc`. Reviews: none yet.
+`work_pool.hh`: `ReadyRing` (stamps), `WorkPool::pick`, `merge_overdue`, `WorkGroup::wait`, `on_idle`.
+Tests: `test/work_pool.cc`, `test/work_group.cc`, `test/work_scheduling.cc`, `test/work_wait.cc`. Reviews: `docs/reviews/phase7c-l2-code.md`.
