@@ -112,3 +112,69 @@ B3 and B4: the two CI runs green, and no wall-clock bound left in cases 5 and th
 Not run: Linux, FreeBSD and arm64 builds (left to CI); any benchmark or K rerun; consumer rebuilds (relied on the ledger's
 record); a full Xapiand build; a TSan run of the full CTest suite on the final head (the tests were exercised by the builder; I ran
 my own stress probes under TSan and ASan instead).
+
+## Re-check 1
+
+Re-checker, 2026-10-29. Subject: fix head `threadpool:0244bd3` (the review is `threadpool:d623d80`). Read `work_pool.hh` and the tests in that
+commit only. Probes and harnesses in `.scratch/rc1/` (rebuilt against the fix head; the original `stress.cc` and `width_xwait.cc` are reused unchanged).
+
+### Verdicts
+
+- **L2-B1 CLOSED.** `work_pool.hh:938-948` (`helpable`: `tickets - listed + helpers < width`) and `:925-932` (`serve()` gives its ticket up when a helper
+  holds the width). `width_xwait` (`wx3`, plain and ASan+UBSan) passes at threads 1, 2, 4 and widths 0 to 3 (24 of 24; the review had 1, 2, 4 at width 1
+  aborting in the watchdog). `stress_asan chain` at 1, 2 and 4 workers passes (84k, 63k, 115k iterations). Revert (mutants run in a copy of the tree,
+  `.scratch/rc1/mut`, so the worktree was not touched): F1 (old rule) dies on case 6d ("width cross wait hung"), F2 (no ticket yield) dies on case 6e
+  (`peak.load() == 1`, `work_scheduling.cc:508`). The width also holds for work served on a rescue thread: `.scratch/rc1/widthres.cc` (query-class waiters
+  nest past 64 on other groups, so rescue threads serve a width-capped group as helpers) measured max concurrent 1, 2 and 3 for widths 1, 2 and 3
+  with 3 to 37 rescue threads created (plain and TSan).
+
+- **L2-B2 OPEN (the reported overflow is fixed, the mechanism is not sound).** The original probe passes: `stress_plain deep 1 20 N` for N = 1000, 5000,
+  20000, 100000 completes (maxdepth 2283 at 100000, no crash); `stress_asan deep` at N = 5000 and 20000 on 1, 2 and 4 workers passes; `max_inline_depth = 64`
+  at `work_pool.hh:669`, `spill`/`rescue` at `:950`/`:961`, the call site at `:1543-1552`. Revert: F3 (no rescue) and F3b (no depth bound) both die in case 6f.
+  Rescue threads do exit and `~WorkPool` waits for them (`:1245-1251`; `after ~WorkPool threads=` is back to the baseline in every run), and TSan and ASan are clean
+  on `stress` (nested, siblings, chain, lastitem, dtor, deep at 1, 2, 4 workers) and on the rescue probes. Two defects:
+  1. **A failed thread creation deadlocks the pool.** `work_pool.hh:1548-1552`: when `spill()` returns false (`std::thread` threw, EAGAIN from a thread or
+     pid limit), the deep waiter drops its reference and falls through to `futex_wait` at `:1577`, with nothing left to serve the group and no retry until some
+     unrelated wake. Probe `.scratch/rc1/rescue.cc` with `libinterpose.dylib` (a dyld interpose of `pthread_create` that returns EAGAIN after K creations;
+     `./rescue_plain W G N K 0 0`): `1 1 200 0` (every rescue creation fails) hangs at 0 of 200 progress; `4 1 2000 0` hangs; `4 1 2000 3` hangs at 779 of 2000;
+     `4 1 20000 10` hangs at 2373 of 20000. The same N complete with no injection (`4 1 2000 -1`). Not a crash, but a silent permanent hang under a thread limit,
+     and no test injects it.
+  2. **Thread count is unbounded, linear in the nested waiters.** There is no pool-wide cap on rescue threads: a new one starts whenever a state has none that is
+     idle (`s->rescuers == s->rescue_busy`, `:1543`), and every rescue thread can nest 64 more. Probe `rescue_plain <W> <G> <N> -1 0 1500` (each group has a gate item
+     that keeps it busy while N items per group wait on it, as a group of long chores waiting on their index would): 20,000 waiting items on 4 workers hold 315 threads
+     (729 created); 4 groups x 20,000 hold 648 (1228 created); 16 groups x 5,000 hold 634; 100 groups x 500 hold 80. Each group with a deep waiter adds at least
+     one. That is the stack cost the old design paid in one stack, now paid in threads; with a pid or `ulimit -u` limit it runs into defect 1. Acceptable only if the limit is
+     stated and defect 1 degrades gracefully. Fix direction: on `spill()` failure keep the waiter retrying (timed `futex_wait`, or serve inline past the cap as the
+     last resort) instead of sleeping on a word nobody will bump; add a pool cap or at least state the bound in `API.md`/`work-pool.md` (threads <= groups with deep
+     waiters + nested waiters / 64); add an injection test (a hook or a `std::thread` factory option). A rescue thread also runs 64 nested waits on the default
+     secondary-thread stack (512 KB on macOS), so 64 times the item's own frame must fit; worth one line in `API.md`.
+
+- **L2-B3 CLOSED** (test fix). `test/work_scheduling.cc:273-312`: one worker; the refresh is posted after `parsed >= 3` and asserts `at_refresh - before <= 2*threads + 2`
+  (own group) and `at_refresh >= 200 - threads` (one FIFO); the two wall-clock bounds are gone (only 60 s loop timeouts remain). Passes 6 of 6 beside 4 CPU burners, and
+  the mutant that drains a lane in one turn still dies on it. Residual: `before` is read a few instructions ahead of the `enqueue`, so a preemption there can add parse
+  items to the difference; a window of nanoseconds, not a sleep. Not verifiable here: the CI run itself (L2-10 is open in the ledger).
+
+- **L2-B4 CLOSED** (test fix). `test/work_group.cc:122-130`: sampled when `light` has run 1,500 items (6000 queued), ratio in [1.5, 3.0]; measured 2.01x beside 4 burners,
+  6 of 6 runs pass. No wall-clock bound left. CI run not seen.
+
+- **L2-N1 PARTIAL, as the ledger says.** The epoch fix works for the review's case 6c (F4 dies "post-wait siblings hung") and the cross-group `suspended` change fixes the
+  `chain` hang at 4 workers (F5 dies). `stress_tsan postwait` still hangs at 2 and 4 workers (1 worker passes), as the review found. `docs/API.md:138-140` now states the
+  contract ("an item that runs there must not block on the progress of the waiter below it").
+
+### N1 as a consumer contract (for L5 and X2, not an L2 blocker)
+
+The pattern is plausible. `docs/design/phase7c.md` D4 has chores that wait for their own index's work call `WorkGroup::wait`, and a sibling chore of the same group is
+then served inline on that waiter's stack. The realistic form is not a flag: it is a **lock or turn held across `wait()`** (a commit or close chore holding a strata
+writer lock, or a lease, while it drains the group; a sibling flush or merge chore served inline on its stack that needs the same lock deadlocks with itself, even on one
+worker). D5 says the turn is held by the awaiter coroutine, not by the worker, so the async turn itself is probably safe; strata's own internal mutexes are the thing to audit.
+Condition for the consumers, not for L2: L5 and X2 must state "no lock held across `wait()` that a chore of the same group takes", assert it in a test of a commit chore waiting
+on a merge chore of the same index, and consider a `wait()` variant that does not serve inline (parks, or serves only other groups) for chores that hold locks.
+
+### New findings
+
+None in the fix beyond B2's two defects above. One line for the lead: the CI run (L2-10) was still queued in the ledger, so B3 and B4 are closed on code and local load runs,
+not on CI.
+
+Not run: Linux, FreeBSD and arm64 builds; any benchmark; consumer rebuilds; the full CTest suite under TSan/ASan on the fix head (the six mutants ran the plain build of
+`work_scheduling_test` in a copy; the sanitizers ran the review's stress probes plus the new rescue probes); the other mutants (M1 to M9, unchanged by this commit);
+an EAGAIN test on Linux (the injection is a macOS dyld interpose); a run of `work_pool_test`/`work_group_test` beyond the load runs above.
