@@ -116,7 +116,9 @@ name is `threadpool`.
   Workers never sleep on a timer or on `std::atomic::wait`. A merge ring entry carries its
   push time (the other rings carry 0); `head_stamp()` peeks it racily, which at worst
   repeats or delays one promotion. `GroupState::suspended` counts running items inside
-  `wait()`; every path out of `wait()` must decrement it.
+  `wait()`, own group or another; every path out of `wait()` must decrement it. A rescue
+  thread counts as a reference of its group's state (`rescuers`), and `~WorkPool` waits for
+  them to exit.
 
 ## How to extend
 

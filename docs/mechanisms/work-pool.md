@@ -43,9 +43,15 @@ pool uses no CPU.
   behind the whole backlog, in its own group it waits one turn.
 - **Waiting.** `WorkGroup::wait()` on a worker serves the group (inline from one of its items,
   else as a helper within the width) and other groups' queries; off the pool it parks on a
-  futex. The group is quiet when nothing is queued and every running item is itself waiting in
-  `wait()` (`GroupState::suspended`), so two items of one group that wait together, or a wait
-  nested in an item run inline, end instead of waiting on each other. A thread that is not a
+  futex. The group is quiet when nothing is queued and every running item is itself inside a
+  `wait()`, of this group or of another (`GroupState::suspended`), and the first wait to find
+  it quiet bumps an epoch that ends the others' waits, so items that wait together, nested,
+  or across groups end instead of waiting on each other. A width-capped group admits a helper
+  while fewer than `width` turns are being served (ring tickets not yet served do not count),
+  and a ring turn that finds a helper in its place gives its ticket up, so the width holds.
+  Inline serving nests on the worker's stack: at 64 nested waits the next hands its serving to
+  a rescue thread (a fresh stack, one more thread per 64 levels) and sleeps. Items served inline
+  sit on the waiter's stack, so one must not block on the waiter's progress. A thread that is not a
   worker first calls `Options::block_guard(site)` (also `help_until`), where a host aborts for
   an event loop: a loop that waits for a pool whose work needs the loop waits for itself.
 - **Idle.** Tokio's protocol over one untimed futex per worker (`futex(2)`,
@@ -68,9 +74,13 @@ for T" rule serves one entry per interval and leaves a backlog of overdue merges
 - Every ring entry is one listed ticket of one lane; a lane with queued work holds one (the
   churn and ping-pong cases in `test/work_group.cc`, `test/work_pool.cc`).
 - Background turns never exceed `threads - reserve`, merges never `merge_cap`, aged ones
-  included (`test/work_scheduling.cc` cases 2 and 3; mutants that bypass either die).
+  included (`test/work_scheduling.cc` cases 2 and 3; mutants that bypass either die). A
+  worker inside a `wait()` serves the awaited group without a slot, so waiting workers can
+  add to both.
 - A merge older than `merge_age` runs under a flood of flushes (case 1, with its control).
-- `wait()` ends when only waiters run (cases 6 and 6b); a non-worker's `wait()` and
+- `wait()` ends when only waiters run (cases 6, 6b, 6c, 6c2); a width-capped group is served
+  by waiters at 1, 2 and 4 threads and keeps its width (6d, 6e); 20,000 self-waiting items
+  and a 300-group wait chain finish on one worker (6f); a non-worker's `wait()` and
   `help_until()` reach the guard before blocking (case 7).
 
 ## Numbers

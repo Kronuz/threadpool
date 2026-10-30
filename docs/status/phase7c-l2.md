@@ -8,7 +8,7 @@
 - Branch / worktree: `phase7c/l2-scheduler` at `~/code/Kronuz/threadpool-wt/l2-scheduler`, from
   `feature/scheduler` at `threadpool:5caedce`, which already sits on main `threadpool:394aaea` (the rebase
   was a no-op, so no history was rewritten; `feature/scheduler` is untouched).
-- State: in review (code review for concurrency is the lead's to launch; not merged; CI to be watched by the lead).
+- State: rework done for `docs/reviews/phase7c-l2-code.md` (REJECT: B1 to B4, N1); re-check and CI are the lead's. Not merged.
 - Done criteria (the task's list; ticked with evidence):
   - [x] L2-1. K1 to K3 reruns on the final code. Data in `docs/status/phase7c-l2/`, Mac x86_64, 16 workers,
     strict hold, 5 trials, medians (range):
@@ -63,14 +63,37 @@
     header); a full Xapiand build was not run (it includes only `threadpool.hh` and `thread.cc`, unchanged).
     Nothing broke. reactor does not link threadpool.
   - [x] L2-9. `cpp-libraries/tools/preflight.sh`: mac-hardened ok, mac-asan-ubsan ok, linux ok (`_GLIBCXX_ASSERTIONS`), freebsd ok; the VMs ran at `--parallel 2` under a light hold (a copy of the script without its host check, since the script waits on the strict hold the VM rule asks for).
+  - [x] L2-11. Review round (`docs/reviews/phase7c-l2-code.md`), each with a mutant that dies (`.scratch/mutants.py`):
+    - B1 width-capped cross-group wait: `helpable` counts only turns being served (`tickets - listed + helpers < width`);
+      a ring turn that finds a helper in its place gives its ticket up, so the width holds (test 6d at 1, 2, 4 threads x
+      width 0 to 3, 6e peak 1 under 4 helpers). F1 (old rule) hangs 6d; F2 (no yield) fails 6e. Probes `width_xwait` at
+      threads 1, 2, 4 and widths 0 to 3, and `stress_asan chain 2 4` and `chain 4 4`, pass.
+    - B2 stack depth: `max_inline_depth` 64 per stack. Past it a waiter starts a rescue thread (one per 64 levels, a fresh
+      stack) that serves the lanes the waiter could, and sleeps; it serves no other group's queries; `rescuers` keeps the
+      group state alive and `~WorkPool` waits for the threads. Test 6f: 20,000 self-waiting items and a 300-group chain on
+      one worker. F3 (no rescue) hangs, F3b (no bound) overflows the stack. `stress_plain deep 1 5 100000` and
+      `stress_asan deep 1 5 20000` pass.
+    - B3 `work_scheduling.cc` case 5: counts and order only, on one worker (`own_between <= 2*threads+2`; one FIFO sees at
+      least `200 - threads` parse items first); a mutant where a turn drains its lane fails it alone.
+    - B4 `work_group.cc` case 4: sampled when the light group has finished 1,500 items, ratio in [1.5, 3.0] (measured
+      2.00); a mutant ignoring the weight fails it.
+    - N1: fixed in part. A wait that finds the group quiet bumps an epoch that ends the other waiters' waits (test 6c, F4
+      hangs), so a sibling that left `wait()` no longer holds the rest. The same hunt found a third hang the probes hit
+      at 4 workers (`stress chain 4`): an item waiting on another group stood below a same-group query served inline on
+      its stack, which then waited for the item below. A running item inside any `wait()` now counts as suspended in its
+      own group (test 6c2, F5 hangs). Not fixed, and documented in API.md: a sibling served inline on a waiter's stack
+      that blocks on the waiter's progress hangs (`stress postwait` at 4 workers; it needs the waiter to inline the
+      sibling, which no rule can tell apart from the cases that need it, since 1 worker has nobody else). Test 6c keeps to
+      rounds where both items really overlap.
+    - N2 (guard entry sites), N3 (waiting workers beyond the caps) are written in API.md and `work-pool.md`.
   - [ ] L2-10. CI green on the pushed branch: run 40981849396 (workflow_dispatch; the workflow has no push trigger for this prefix) was queued when I stopped, no job result yet. The lead watches.
 - Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs
   commit after it (README untouched; API, ARCHITECTURE, AGENTS, `docs/mechanisms/work-pool.md`, this ledger and
   the K data).
 - Doing: nothing.
 - Next:
-  1. The lead launches the concurrency code review (the new probes: `head_stamp()`'s racy peek, `suspended`
-     on every exit of `wait()`, aging under `held` slots) and watches CI.
+  1. The lead's re-check of B1 to B4 and N1, and CI. The new areas to look at: `serve()`'s ticket yield, `spill()` and
+     `rescue()`, `wait()`'s `done()` and the cross-group `suspended`.
   2. K6 (FreeBSD kernel time, `bench/kernel_time.cc`) was not part of L2 and is still open from `scheduler.md`.
   3. Xapiand sets `block_guard` to `engine::check_may_block` and posts chores with `merge_age` as D4 states.
 - Blocked on: nothing.
@@ -93,3 +116,6 @@
   Baseline TSan and ASan+UBSan clean. Aging, guard, wait fix and tests in `threadpool:6573176`; first run of
   the nested V2 case hung, which is how the wait deadlock was found. Mutants, sanitizers, K1 to K3 reruns, A/B,
   consumer builds and preflight run the same day.
+- 2026-10-29 (review round): `docs/reviews/phase7c-l2-code.md` committed as delivered, then the fixes above. The
+  nested probe `chain 4` found the cross-group hang while closing N1; the wait rules changed three times in this round
+  (width admission, epoch, cross-group suspended), each with a test that hangs without it.

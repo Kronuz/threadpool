@@ -267,9 +267,17 @@ every sleeper.
 **Waiting without deadlock.** `WorkGroup::wait()` on a worker serves the group it waits
 on: inline when called from one of the group's items (it already holds the group's
 place), otherwise as a helper within the group's width. The group counts its items that
-are suspended in `wait()`; it is quiet when nothing is queued and only they run, so items
-that wait together or nested do not wait on each other. A thread that is not a worker
-calls `Options::block_guard` first, where a host aborts for an event loop. It also serves other groups'
+are suspended in any `wait()`, its own group's or another's; it is quiet when nothing is
+queued and only they run, and a wait that finds it quiet bumps an epoch that ends the
+other waiters' waits too, so items that wait together, nested, or across groups do not
+wait on each other, and none has to stay in `wait()` for a sibling that already left. A
+helper is admitted to a width-capped group while fewer than `width` turns are being
+served (tickets still on the ring do not count, or workers all waiting would starve the
+group), and a ring turn that finds a helper has taken its place gives its ticket up.
+Inline serving nests on the worker's stack, so a wait 64 deep starts a rescue thread that
+serves for it from a fresh stack (a new one at each 64 levels) and sleeps; the rescue
+thread exits when nothing can be served. A thread that is not a worker calls
+`Options::block_guard` first, where a host aborts for an event loop. It also serves other groups'
 queries, never their flushes or merges, which may wait in turn. Off the pool it parks on
 a futex. `help_until(pred)` follows the same rule for an arbitrary condition.
 

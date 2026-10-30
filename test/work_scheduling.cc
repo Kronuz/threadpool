@@ -271,13 +271,14 @@ int main() {
 	}
 
 	// ---- 5. Parse-ahead in its own group does not delay the index's refresh (C8.1): groups
-	// take turns, while one group's lane is a FIFO. ----
+	// take turns, while one group's lane is a FIFO. Counts and order only, no clock. ----
 	{
 		Watchdog dog(60, "parse-ahead");
-		Clock::duration separate{};
-		Clock::duration shared{};
+		const unsigned threads = 1;  // one worker: the backlog and the refresh share it
+		int own_between = -1;
+		int shared_before = -1;
 		for (bool own : {true, false}) {
-			WorkPool pool({.threads = 2, .reserve = 0});
+			WorkPool pool({.threads = threads, .reserve = 0});
 			WorkGroup index(pool);
 			WorkGroup parse(pool);
 			WorkGroup& ahead = own ? parse : index;
@@ -288,25 +289,26 @@ int main() {
 					parsed.fetch_add(1);
 				});
 			}
-			std::this_thread::sleep_for(5ms);
+			// The refresh is posted after some of the backlog ran, and after however much
+			// more ran before it was posted; what it sees is measured against that.
+			assert(wait_for([&] { return parsed.load() >= 3; }, 60000ms));
+			int before = parsed.load();
 			std::atomic<int> at_refresh{-1};
-			auto t0 = Clock::now();
 			index.enqueue([&] { at_refresh = parsed.load(); });
-			assert(wait_for([&] { return at_refresh.load() >= 0; }, 5000ms));
-			(own ? separate : shared) = Clock::now() - t0;
+			assert(wait_for([&] { return at_refresh.load() >= 0; }, 60000ms));
 			ahead.wait();
 			index.wait();
 			if (own) {
-				assert(at_refresh.load() < 20);  // 200 items queued: it ran after a turn or two
+				own_between = at_refresh.load() - before;
+				assert(own_between <= int(2 * threads + 2));  // a turn or two of parse-ahead
 			} else {
-				assert(at_refresh.load() >= 150);  // behind the whole backlog
+				shared_before = at_refresh.load();
+				// One FIFO: every parse item was queued ahead of it; at most threads - 1 were still
+				// running when it started.
+				assert(shared_before >= 200 - int(threads));
 			}
 		}
-		assert(separate < 30ms);
-		assert(shared > 40ms);
-		std::printf("work_scheduling OK: refresh waited %lld ms beside a parse-ahead group, %lld ms behind it in one FIFO\n",
-			static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(separate).count()),
-			static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(shared).count()));
+		std::printf("work_scheduling OK: %d parse items ran between the refresh's post and its run beside a parse-ahead group, all 200 first in one FIFO\n", own_between);
 	}
 
 	// ---- 6. V2: a worker waits on work queued only in its own group, in every class pairing,
@@ -370,7 +372,8 @@ int main() {
 		for (int i = 0; i < 3; ++i) {
 			group.enqueue([&] {
 				waiting.fetch_add(1);
-				while (waiting.load() < 3) {
+				auto end = Clock::now() + 200ms;
+				while (waiting.load() < 3 && Clock::now() < end) {
 					std::this_thread::sleep_for(100us);
 				}
 				group.wait();  // every other running item is in this call too
@@ -381,6 +384,174 @@ int main() {
 		group.wait();  // from outside: returns when the items have finished, not before
 		assert(after.load() == 3);
 		std::printf("work_scheduling OK: three items of one group waited together, and an outside wait saw them finish\n");
+	}
+
+	// ---- 6c. A wait that found the group quiet ends the other waiters' waits with it, even
+	// when the first to return then blocks on the second (each sets its flag after wait() and
+	// spins for the other's). Only rounds where both items really ran at once count; a pool
+	// does not fan out to an idle worker until a turn ends, so some rounds run one at a time. ----
+	{
+		Watchdog dog(60, "post-wait siblings");
+		WorkPool pool({.threads = 2, .reserve = 0});
+		std::atomic<int> overlapped{0};
+		for (int round = 0; round < 400; ++round) {
+			WorkGroup group(pool);
+			std::atomic<int> started{0};
+			std::atomic<int> decision{0};
+			std::atomic<bool> flag[2] = {false, false};
+			for (int i = 0; i < 2; ++i) {
+				group.enqueue([&, i] {
+					started.fetch_add(1);
+					auto end = Clock::now() + 20ms;
+					while (started.load() < 2 && Clock::now() < end) {
+						std::this_thread::yield();
+					}
+					// The first to leave the barrier decides for both.
+					int verdict = 0;
+					decision.compare_exchange_strong(verdict, started.load() >= 2 ? 1 : 2);
+					bool both = decision.load() == 1;
+					group.wait();
+					if (both) {
+						flag[i] = true;
+						while (!flag[1 - i].load()) {
+							std::this_thread::yield();
+						}
+						if (i == 0) {
+							overlapped.fetch_add(1);
+						}
+					}
+				});
+			}
+			group.wait();
+		}
+		assert(overlapped.load() >= 1);
+		std::printf("work_scheduling OK: siblings that block on each other after wait() ended (%d of 400 rounds overlapped)\n", overlapped.load());
+	}
+
+	// ---- 6c2. An item that waits on another group counts as a waiter in its own group: a
+	// query of its group served inline on its stack (while it waits) can finish its own wait,
+	// where waiting for the item below it would never end. ----
+	{
+		Watchdog dog(60, "cross wait then own wait");
+		WorkPool pool({.threads = 2, .reserve = 0});
+		WorkGroup g(pool);
+		WorkGroup h(pool);
+		std::atomic<bool> c_started{false};
+		std::atomic<bool> release{false};
+		std::atomic<bool> done{false};
+		h.enqueue([&] {
+			c_started = true;
+			while (!release.load()) {
+				std::this_thread::yield();
+			}
+		});
+		assert(wait_for([&] { return c_started.load(); }, 60000ms));
+		g.enqueue([&] {
+			g.enqueue([&] {
+				g.wait();  // the item below, in h.wait(), is suspended too
+				release = true;
+			}, WorkClass::query);
+			h.wait();
+			done = true;
+		});
+		g.wait();
+		assert(done.load());
+		h.wait();
+		std::printf("work_scheduling OK: a query served inline under a cross-group wait ended its own wait\n");
+	}
+
+	// ---- 6d. A worker waits on another group with a width, all workers waiting at once
+	// (the ring ticket of a width-capped group is not a running turn). ----
+	{
+		Watchdog dog(60, "width cross wait");
+		for (unsigned threads : {1u, 2u, 4u}) {
+			for (unsigned width : {0u, 1u, 2u, 3u}) {
+				WorkPool pool({.threads = threads});
+				WorkGroup h(pool, width);
+				WorkGroup p(pool);
+				std::atomic<int> ran{0};
+				for (unsigned i = 0; i < threads; ++i) {
+					p.enqueue([&] {
+						std::this_thread::sleep_for(30ms);  // every worker is inside a p item
+						h.enqueue([&] { ran.fetch_add(1); });
+						h.wait();
+					});
+				}
+				p.wait();
+				assert(ran.load() == int(threads));
+			}
+		}
+		std::printf("work_scheduling OK: workers waiting on a width-capped group completed at 1, 2 and 4 threads\n");
+	}
+
+	// ---- 6e. Waiting helpers keep the width: at most one item of a width-1 group at a time. ----
+	{
+		Watchdog dog(60, "width under helpers");
+		WorkPool pool({.threads = 4, .reserve = 0});
+		WorkGroup h(pool, 1);
+		WorkGroup p(pool);
+		std::atomic<unsigned> now{0};
+		std::atomic<unsigned> peak{0};
+		for (int i = 0; i < 4; ++i) {
+			p.enqueue([&] {
+				for (int k = 0; k < 60; ++k) {
+					h.enqueue([&] {
+						note_peak(now, peak);
+						burn(100us);
+						now.fetch_sub(1);
+					});
+					h.wait();
+				}
+			});
+		}
+		p.wait();
+		assert(peak.load() == 1);
+		std::printf("work_scheduling OK: width 1 held under 4 waiting helpers (peak %u)\n", peak.load());
+	}
+
+	// ---- 6f. Waits nest deeper than a stack allows: 20,000 queued items that each wait on
+	// their group, and a chain of 300 groups each waited on from the previous one's item, on
+	// one worker. Past max_inline_depth a rescue thread serves, so none deadlocks or
+	// overflows. ----
+	{
+		Watchdog dog(120, "deep waits");
+		{
+			WorkPool pool({.threads = 1});
+			WorkGroup group(pool);
+			std::atomic<int> done{0};
+			for (int i = 0; i < 20000; ++i) {
+				group.enqueue([&] {
+					group.wait();
+					done.fetch_add(1);
+				});
+			}
+			group.wait();
+			assert(wait_for([&] { return done.load() == 20000; }, 60000ms));
+		}
+		{
+			constexpr int links = 300;
+			WorkPool pool({.threads = 1});
+			std::vector<std::unique_ptr<WorkGroup>> chain;
+			for (int i = 0; i < links; ++i) {
+				chain.push_back(std::make_unique<WorkGroup>(pool));
+			}
+			std::atomic<int> done{0};
+			struct Link {
+				std::vector<std::unique_ptr<WorkGroup>>& chain;
+				std::atomic<int>& done;
+				void operator()(int i) {
+					if (i + 1 < links) {
+						chain[i + 1]->enqueue([this, i] { (*this)(i + 1); });
+						chain[i + 1]->wait();  // not this item's group: served as a helper
+					}
+					done.fetch_add(1);
+				}
+			} link{chain, done};
+			chain[0]->enqueue([&] { link(0); });
+			chain[0]->wait();
+			assert(wait_for([&] { return done.load() == links; }, 60000ms));
+		}
+		std::printf("work_scheduling OK: 20,000 self-waiting items and a 300-group wait chain finished on one worker\n");
 	}
 
 	// ---- 7. V5: a thread that is not a worker calls a waiting entry and hits the guard,

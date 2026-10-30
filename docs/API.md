@@ -91,7 +91,9 @@ index.wait();
   - `threads` (`0`: the hardware's concurrency).
   - `reserve` (`1`): workers kept free of flush and merge work, so a query waits for a
     wake, not for an item to end. Clamped to `threads - 1`.
-  - `merge_cap` (`0`: `threads - reserve`): workers merges may hold.
+  - `merge_cap` (`0`: `threads - reserve`): workers merges may hold. A worker inside a
+    `wait()` serves the awaited group's items without taking a background or merge slot,
+    so the caps can be exceeded by that many waiting workers.
   - `quantum` (`100us`): service per turn; a group's turn is `quantum * weight`.
   - `name_format` (`"W{:02}"`): a `std::format` string over the worker index.
   - `merge_age` (`100ms`, `0`: never): a merge entry that has waited this long is picked
@@ -99,7 +101,10 @@ index.wait();
   - `block_guard` (`nullptr`): `void (*)(const char* site) noexcept`, called when a thread
     that is not a worker enters `WorkGroup::wait()` (site `"WorkGroup::wait"`) or
     `help_until()` (`"WorkPool::help_until"`), before it can block. A host aborts or logs
-    there for a thread that must never wait, such as an event loop.
+    there for a thread that must never wait, such as an event loop. It fires on entry,
+    even when the wait would return at once, and for `~WorkGroup` run on a non-worker
+    (its wait), so a host's guard lets shutdown through. `sleep_until` and `~WorkPool`
+    are not guarded.
 - `~WorkPool()` — runs what is queued, then joins. Every `WorkGroup` must be gone.
 - `post(WorkItem&)` — queue an item on `item.group` (the pool's own group when null), in
   `item.cls`, from any thread; never blocks, never allocates.
@@ -116,19 +121,25 @@ index.wait();
 ### `WorkGroup`
 
 - `WorkGroup(WorkPool&, unsigned width = 0, unsigned weight = 1)` — `width` caps how many
-  of the group's items of one class run at once (`0`: no cap); `weight` is quanta per
-  turn.
+  of the group's items of one class run at once (`0`: no cap), waiting helpers included
+  (a helper is admitted while fewer than `width` turns are being served, and a ring turn
+  that then finds it over the width gives its ticket up); `weight` is quanta per turn.
 - `post(WorkItem&)` — set `item.group` and post it.
 - `enqueue(func, WorkClass = flush) -> bool` — box `func()` or `func(const WorkItem&)` and
   post it; `false` if the box cannot be allocated. Exceptions go to `L_EXC`.
 - `cancel() -> WorkItem*` — unlink the queued items and return them through `next`,
   queries, then flushes, then merges, each oldest first; running items see
   `stop_requested()`. Items posted afterwards run normally.
-- `wait()` — until nothing is queued and nothing runs but waiters: the caller and the
-  group's other items inside their own `wait()` when called from one of its items (so items
-  that wait together, or nest, do not wait on each other); from outside, until nothing
-  runs. On a worker it serves the group, and other groups' queries, meanwhile; off the pool
-  it parks.
+- `wait()` — until nothing is queued and nothing runs but waiters. From one of the group's
+  items, the other items of the group that are inside any `wait()` (this group's or
+  another's) count as waiters, so items that wait together, nest, or wait across groups
+  do not wait on each other, and the wait ends as soon as the group was quiet once after
+  it began; from outside, until nothing runs. On a worker it serves the group, and other
+  groups' queries, meanwhile; off the pool it parks. Serving runs queued items inline on
+  the waiter's stack, so an item that runs there must not block on the progress of the
+  waiter below it (a flag the waiter sets after `wait()`, say). Waits nest at most 64
+  deep per stack; a wait past that hands the serving to a rescue thread (one per 64
+  levels) and sleeps, and serves no other group's queries.
 - `cancel_and_wait() -> size_t`, `stop_requested()` (for the item running on this
   thread), `set_width()`, `set_weight()`, `pool()`.
 - `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are

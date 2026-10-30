@@ -103,7 +103,7 @@ int main() {
 		std::atomic<int> h{0};
 		std::atomic<int> l{0};
 		std::atomic<bool> stop{false};
-		for (int i = 0; i < 2000; ++i) {
+		for (int i = 0; i < 6000; ++i) {
 			heavy.enqueue([&] {
 				if (!stop.load()) {
 					burn(50us);
@@ -117,15 +117,17 @@ int main() {
 				}
 			});
 		}
-		std::this_thread::sleep_for(60ms);
+		// Sampled at a fixed count of the light group's items, so the ratio averages over
+		// thousands of turns whatever the clock does.
+		spin_until([&] { return l.load() >= 1500; });
 		stop = true;
-		auto hc = h.load();
 		auto lc = l.load();
+		auto hc = h.load();
 		heavy.wait();
 		light.wait();
-		double ratio = lc ? double(hc) / double(lc) : 0;
+		double ratio = double(hc) / double(lc);
 		std::printf("work_group OK: weight 2 against 1 ran %d against %d items (%.2fx)\n", hc, lc, ratio);
-		assert(ratio > 1.3 && ratio < 3.5);
+		assert(ratio > 1.5 && ratio < 3.0);
 	}
 
 	// ---- 5. cancel() hands back the queued items; the running one sees its stop. ----
