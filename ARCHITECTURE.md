@@ -249,7 +249,10 @@ therefore needs (open groups + workers) entries per class.
 Strict order alone would let long background items take every worker, so a flush or
 merge turn holds one of `threads - reserve` background slots, taken with an RMW before
 the pop, and merges hold at most `merge_cap`. A query waits for a wake, not for an item
-to end. Starving flushes with a flood of queries is possible; nothing ages them yet.
+to end. A merge entry carries its push time; once the oldest has waited longer than
+`merge_age` (100 ms), a background pick takes it before the flush ring, under the same
+slots, so a flood of flushes cannot starve merges and the reserve stays free. Starving
+flushes with a flood of queries is possible; nothing ages them.
 
 **Idle protocol.** Tokio's (`idle.rs`, MIT). One 64-bit word counts searching and
 unparked workers. A post wakes a sleeper only when no worker is searching; at most half
@@ -263,7 +266,10 @@ every sleeper.
 
 **Waiting without deadlock.** `WorkGroup::wait()` on a worker serves the group it waits
 on: inline when called from one of the group's items (it already holds the group's
-place), otherwise as a helper within the group's width. It also serves other groups'
+place), otherwise as a helper within the group's width. The group counts its items that
+are suspended in `wait()`; it is quiet when nothing is queued and only they run, so items
+that wait together or nested do not wait on each other. A thread that is not a worker
+calls `Options::block_guard` first, where a host aborts for an event loop. It also serves other groups'
 queries, never their flushes or merges, which may wait in turn. Off the pool it parks on
 a futex. `help_until(pred)` follows the same rule for an arbitrary condition.
 

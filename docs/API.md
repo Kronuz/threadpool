@@ -94,6 +94,12 @@ index.wait();
   - `merge_cap` (`0`: `threads - reserve`): workers merges may hold.
   - `quantum` (`100us`): service per turn; a group's turn is `quantum * weight`.
   - `name_format` (`"W{:02}"`): a `std::format` string over the worker index.
+  - `merge_age` (`100ms`, `0`: never): a merge entry that has waited this long is picked
+    ahead of flush entries, within `merge_cap` and the background slots.
+  - `block_guard` (`nullptr`): `void (*)(const char* site) noexcept`, called when a thread
+    that is not a worker enters `WorkGroup::wait()` (site `"WorkGroup::wait"`) or
+    `help_until()` (`"WorkPool::help_until"`), before it can block. A host aborts or logs
+    there for a thread that must never wait, such as an event loop.
 - `~WorkPool()` — runs what is queued, then joins. Every `WorkGroup` must be gone.
 - `post(WorkItem&)` — queue an item on `item.group` (the pool's own group when null), in
   `item.cls`, from any thread; never blocks, never allocates.
@@ -103,6 +109,9 @@ index.wait();
 - `sleep_until(time_point, WorkGroup&) -> bool` — sleep until the deadline (`true`) or
   until the group is cancelled (`false`), in one timed futex wait.
 - `threads()`, `on_worker()`.
+- `merge_waiting()`, `merge_oldest()`, `merges_aged()` — the merge backlog: entries waiting
+  now (approximate), how long the oldest has waited, and how many merge turns went ahead of
+  flush for their age.
 
 ### `WorkGroup`
 
@@ -115,9 +124,11 @@ index.wait();
 - `cancel() -> WorkItem*` — unlink the queued items and return them through `next`,
   queries, then flushes, then merges, each oldest first; running items see
   `stop_requested()`. Items posted afterwards run normally.
-- `wait()` — until nothing is queued and nothing runs but the caller (when called from
-  one of the group's items). On a worker it serves the group, and other groups'
-  queries, meanwhile; off the pool it parks.
+- `wait()` — until nothing is queued and nothing runs but waiters: the caller and the
+  group's other items inside their own `wait()` when called from one of its items (so items
+  that wait together, or nest, do not wait on each other); from outside, until nothing
+  runs. On a worker it serves the group, and other groups' queries, meanwhile; off the pool
+  it parks.
 - `cancel_and_wait() -> size_t`, `stop_requested()` (for the item running on this
   thread), `set_width()`, `set_weight()`, `pool()`.
 - `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are

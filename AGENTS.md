@@ -22,6 +22,8 @@ test/test.cc                  Runnable smoke test: pool of N tasks, async future
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
 test/work_pool.cc             WorkPool tests: delivery, reposts, help_until, draining, ping-pong, idle CPU.
 test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
+test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 waits, concurrent waits, the V5 guard.
+docs/mechanisms/work-pool.md  How WorkPool works, why, and what guards each invariant.
 bench/                        kernel_time.cc (THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
@@ -111,7 +113,10 @@ name is `threadpool`.
   count (that bounds the ring); a group's state is freed only by whoever drops its last
   ticket or helper; every post that pushes a ring entry does so with a seq_cst CAS before
   `Idle::notify_one`, the half of the lost-wakeup pair the parker's final check relies on.
-  Workers never sleep on a timer or on `std::atomic::wait`.
+  Workers never sleep on a timer or on `std::atomic::wait`. A merge ring entry carries its
+  push time (the other rings carry 0); `head_stamp()` peeks it racily, which at worst
+  repeats or delays one promotion. `GroupState::suspended` counts running items inside
+  `wait()`; every path out of `wait()` must decrement it.
 
 ## How to extend
 

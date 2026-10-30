@@ -1,3 +1,5 @@
+> Status: SUPERSEDED (2026-10-29) by `phase7c-l2.md`, which finishes this branch (R1 to R3 stand; the K evidence there is the final).
+
 # scheduler
 
 - Design: the research note `docs/research/scheduler.md` on `research/scheduler`
