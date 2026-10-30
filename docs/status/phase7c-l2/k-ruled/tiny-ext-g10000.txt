@@ -1,0 +1,21 @@
+workloads: tiny threads=16 trials=5 pools=baseline,groups,prio,workpool,
+tiny pool=baseline       groups=10000  producers=1 work_ns=0     tasks=500000 wall=2.940s rate=0.17M/s ns_per_task=5880.7 post_ns=5880.7 cpu_ns_per_task=16271.8
+tiny pool=groups         groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.077s rate=6.53M/s ns_per_task=153.1 post_ns=153.1 cpu_ns_per_task=1855.3
+tiny pool=prio-r1-m15    groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.083s rate=6.05M/s ns_per_task=165.2 post_ns=165.2 cpu_ns_per_task=1790.5
+tiny pool=workpool       groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.076s rate=6.58M/s ns_per_task=152.0 post_ns=152.0 cpu_ns_per_task=1643.4
+tiny pool=baseline       groups=10000  producers=1 work_ns=0     tasks=500000 wall=2.949s rate=0.17M/s ns_per_task=5897.1 post_ns=5897.1 cpu_ns_per_task=16418.5
+tiny pool=groups         groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.075s rate=6.70M/s ns_per_task=149.2 post_ns=149.2 cpu_ns_per_task=1771.1
+tiny pool=prio-r1-m15    groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.079s rate=6.33M/s ns_per_task=157.9 post_ns=157.8 cpu_ns_per_task=1864.2
+tiny pool=workpool       groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.076s rate=6.56M/s ns_per_task=152.3 post_ns=152.2 cpu_ns_per_task=1643.6
+tiny pool=baseline       groups=10000  producers=1 work_ns=0     tasks=500000 wall=2.931s rate=0.17M/s ns_per_task=5862.0 post_ns=5862.0 cpu_ns_per_task=16351.9
+tiny pool=groups         groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.073s rate=6.86M/s ns_per_task=145.7 post_ns=145.7 cpu_ns_per_task=1618.2
+tiny pool=prio-r1-m15    groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.087s rate=5.75M/s ns_per_task=174.0 post_ns=174.0 cpu_ns_per_task=2137.4
+tiny pool=workpool       groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.073s rate=6.85M/s ns_per_task=146.0 post_ns=146.0 cpu_ns_per_task=1542.7
+tiny pool=baseline       groups=10000  producers=1 work_ns=0     tasks=500000 wall=2.946s rate=0.17M/s ns_per_task=5891.6 post_ns=5891.6 cpu_ns_per_task=16456.3
+tiny pool=groups         groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.075s rate=6.63M/s ns_per_task=150.8 post_ns=150.8 cpu_ns_per_task=1819.4
+tiny pool=prio-r1-m15    groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.078s rate=6.41M/s ns_per_task=156.0 post_ns=156.0 cpu_ns_per_task=1770.8
+tiny pool=workpool       groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.052s rate=9.54M/s ns_per_task=104.8 post_ns=102.7 cpu_ns_per_task=1605.7
+tiny pool=baseline       groups=10000  producers=1 work_ns=0     tasks=500000 wall=2.934s rate=0.17M/s ns_per_task=5869.0 post_ns=5869.0 cpu_ns_per_task=16439.4
+tiny pool=groups         groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.080s rate=6.25M/s ns_per_task=160.1 post_ns=159.9 cpu_ns_per_task=2148.5
+tiny pool=prio-r1-m15    groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.084s rate=5.92M/s ns_per_task=169.0 post_ns=169.0 cpu_ns_per_task=2219.1
+tiny pool=workpool       groups=10000  producers=1 work_ns=0     tasks=500000 wall=0.071s rate=7.09M/s ns_per_task=141.1 post_ns=140.9 cpu_ns_per_task=1470.1

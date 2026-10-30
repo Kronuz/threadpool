@@ -134,15 +134,33 @@
       path to take; I5 replaces the thread-growth probe.
     - Sanitizers on `threadpool:19a17d0`: TSan (`-O1`) all 7 CTest targets once, 4 repeats of the 4 work_ targets, and
       `work_wait` with 2,000 graphs twice; ASan+UBSan the same with 3 repeats; all clean.
-    - `cpp-libraries/tools/preflight.sh`: mac-hardened ok, mac-asan-ubsan ok. Linux and FreeBSD VMs: see Next.
+    - `cpp-libraries/tools/preflight.sh` on `threadpool:19a17d0`: mac-hardened, mac-asan-ubsan, linux, freebsd all ok (the VMs ran
+      under a light hold beside strata L5's work, after its final preflight ended).
+    - Consumers: strata L5 `27c944e` (pin `0244bd3`) builds and passes 61 of 61 with this worktree substituted for
+      threadpool (`.scratch/cons_l5.sh`); scheduler, logger, http-log and prism do not use `WorkGroup`.
+  - [x] L2-13. K1 to K3 rerun on the ruled code (strict, exclusive on macOS, Mac x86_64, 16 workers, 5 trials, medians (range),
+    data in `docs/status/phase7c-l2/k-ruled/`), against L2-1's numbers: K1 1 group 241 (234-247) ns/task against 269
+    (250-277); 1,000 groups 143 (136-152) against 138; 10,000 groups 146 (105-152) against 144; 1 us tasks 81 (79-84) against
+    84; 4 producers 79 (70-82) against 69 (40-102); worker-local chains 14 (13-18) against 13 (11-16); CPU per task, 1 group
+    1,937 against 2,100. K2 one group alone 5.17 ms against 5.1; beside 1,000 busy groups share 1.01 (0.94-1.02) against
+    1.01; reserve 0 1.02 against 1.02. K3 query wait, 1,000 busy groups p50 7.6 us / p99 157.5 us / p99.9 312 us against 8.0 /
+    176 / 312; 1 hot group p99 167 us against 162; 10,000 groups p99 147 us against 179; background throughput 16.7k tasks/s
+    against 16.6k. Deleting help from waits does not move any row outside the earlier ranges (the harness never waits from a
+    worker; the hot path changed only by the frame in `run_item` and one `waiters`/`idle` check per turn).
   - [ ] L2-10. CI green on the pushed branch: run 40981849396 (workflow_dispatch; the workflow has no push trigger for this prefix) was queued when I stopped, no job result yet. The lead watches.
 - Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs commit after it;
   the review round (`threadpool:0244bd3`, B1, B3, B4); `threadpool:7a1a5c5` the ruled wait, `on_idle` and `test/work_wait.cc`;
   `threadpool:19a17d0` the ASan chain length and ARCHITECTURE.
 - Doing: nothing.
 - Next:
-  1. The lead: CI on the pushed head; the Linux and FreeBSD preflight and the K1 to K3 rerun are queued behind strata L5's
-     final preflight (strict holds are exclusive on macOS), results in the Log when they land.
+  1. The lead: CI. Run 40995760989 (`threadpool:5b482da`) had linux-asan-ubsan fail: LeakSanitizer found a boxed item that
+     `work_wait`'s on_idle test cancelled and dropped (a test bug, fixed in `threadpool:5570775`; macOS ASan cannot see
+     leaks, so only Linux did). Run 40996635396 (`threadpool:5570775`, dispatched with `gh workflow run ci.yml --ref
+     phase7c/l2-scheduler`): at my last look every job was green except macos-x86_64 (still running) and freebsd-x86_64,
+     which failed `test/work_group.cc:54` (`peak == 4`, case 1: one group alone on all four workers, a timing
+     assertion under `ctest --parallel 2` on the VM); the same library code passed that job in the first run, and the
+     FreeBSD preflight passes it here, so it looks like a flaky pre-existing test (not touched by this change; B3 and B4
+     were the same kind), not a regression. Not rerun.
   2. The re-check of B2 and N1 with `.scratch/arch/inversion.cc`, `.scratch/rc1/rescue.cc` (obsolete, see L2-12) and
      `stress.cc deep` (a death test now; `.scratch/l2b/stress.cc deepchild` is its child-group form).
   3. strata L5 must change (list for the lead; strata is not edited here): repin `threadpool` in `CMakeLists.txt:30` from
@@ -166,7 +184,7 @@
   4. `reserve` default stays 1 (C8.3), because 7c posts at `query`.
   5. From `scheduler.md`, still open: extra tickets capped pool-wide; the destructor cancels; `width` per class.
 - Last verified: 2026-10-29, Mac x86_64, Apple clang (plain, `-O2 -g`, asserts on) and Homebrew LLVM 23 (TSan,
-  ASan+UBSan): all 6 CTest targets pass.
+  ASan+UBSan): all 7 CTest targets pass.
 
 ## Log
 - 2026-10-29: `threadpool:5caedce` found already on main `394aaea`; worktree `phase7c/l2-scheduler` cut from it.
@@ -176,3 +194,7 @@
 - 2026-10-29 (review round): `docs/reviews/phase7c-l2-code.md` committed as delivered, then the fixes above. The
   nested probe `chain 4` found the cross-group hang while closing N1; the wait rules changed three times in this round
   (width admission, epoch, cross-group suspended), each with a test that hangs without it.
+- 2026-10-29 (architect ruling): `threadpool:7a1a5c5` implemented AL1/AL2 and deleted the rescue threads, the cap, `suspended`,
+  the epoch and help-anything. The first run of the new tests passed; the mutants (`.scratch/mutl2.py`) all died except the
+  helpable half of the wake, which has no liveness consequence. ASan overflowed the macOS worker stack on a 500-group chain
+  (150 there). Linux CI's LeakSanitizer found a test leak mac cannot see. K1 to K3 rerun after the VM preflight.
