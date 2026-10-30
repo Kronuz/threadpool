@@ -732,9 +732,9 @@ public:
 		const char* name_format = "W{:02}";  // a std::format string over the worker index
 		// A merge ticket that has waited this long is picked ahead of flush tickets (0: never).
 		std::chrono::nanoseconds merge_age = std::chrono::milliseconds(100);
-		// Called with a site name when a thread that is not a worker enters wait() or
-		// help_until(), before it blocks: a host aborts or logs there when the thread is one
-		// that must never wait (an event loop). Null: no check.
+		// Called with a site name when a thread that is not a worker enters wait(), before
+		// it blocks: a host aborts or logs there when the thread is one that must never
+		// wait (an event loop; it joins a group with on_idle()). Null: no check.
 		void (*block_guard)(const char* site) noexcept = nullptr;
 	};
 

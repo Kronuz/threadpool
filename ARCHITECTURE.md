@@ -264,22 +264,19 @@ sleep on an untimed platform futex each (`futex(2)`, `os_sync_wait_on_address`,
 wait (a timed condvar wake costs FreeBSD several times the kernel time). Shutdown unparks
 every sleeper.
 
-**Waiting without deadlock.** `WorkGroup::wait()` on a worker serves the group it waits
-on: inline when called from one of the group's items (it already holds the group's
-place), otherwise as a helper within the group's width. The group counts its items that
-are suspended in any `wait()`, its own group's or another's; it is quiet when nothing is
-queued and only they run, and a wait that finds it quiet bumps an epoch that ends the
-other waiters' waits too, so items that wait together, nested, or across groups do not
-wait on each other, and none has to stay in `wait()` for a sibling that already left. A
-helper is admitted to a width-capped group while fewer than `width` turns are being
-served (tickets still on the ring do not count, or workers all waiting would starve the
-group), and a ring turn that finds a helper has taken its place gives its ticket up.
-Inline serving nests on the worker's stack, so a wait 64 deep starts a rescue thread that
-serves for it from a fresh stack (a new one at each 64 levels) and sleeps; the rescue
-thread exits when nothing can be served. A thread that is not a worker calls
-`Options::block_guard` first, where a host aborts for an event loop. It also serves other groups'
-queries, never their flushes or merges, which may wait in turn. Off the pool it parks on
-a futex. `help_until(pred)` follows the same rule for an arbitrary condition.
+**Waiting without deadlock.** `WorkGroup::wait()` on a worker serves only the group it
+waits on, inline, as a helper within the group's width, and nothing else: no query, no
+other group's item, no new thread. A helper is admitted to a width-capped group while fewer
+than `width` turns are being served (tickets still on the ring do not count, or workers
+all waiting would starve the group), and a ring turn that finds a helper has taken its
+place gives its ticket up. `tls_here.top` chains the items running on the stack, and a
+wait on a group in the chain, its own included, aborts: the waiter would wait for work
+below it. With an acyclic wait-for graph (items wait only on lower groups) every wait
+ends, since a worker's wait never needs another free worker; the argument is in
+`docs/mechanisms/work-pool.md`. Parked waiters wake when a turn ends with the group idle or
+helpable. A thread that is not a worker calls `Options::block_guard` first, where a host
+aborts for an event loop, which joins a group through `on_idle()` instead: a one-shot
+callback run by the thread that makes the group idle.
 
 **Lifetime.** A group's state is allocated when the `WorkGroup` opens and freed by
 whoever drops its last reference: the destructor, or the worker that pops its last

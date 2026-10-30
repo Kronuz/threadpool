@@ -29,6 +29,10 @@
 
 #include "work_pool.hh"
 
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 
@@ -506,7 +510,13 @@ int main() {
 		}
 		// A chain of 500 groups, each item waiting on the next one's, on one worker.
 		{
+			// The chain's depth is the stack it needs; ASan's frames are several times larger and
+			// a macOS worker has 512 KB, so that build runs a shorter chain.
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+			constexpr int links = 150;
+#else
 			constexpr int links = 500;
+#endif
 			WorkPool pool({.threads = 1});
 			std::vector<std::unique_ptr<WorkGroup>> chain;
 			for (int i = 0; i < links; ++i) {
