@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-29) `WorkPool` as built on `phase7c/l2-scheduler`; the design is the research note `docs/research/scheduler.md` (R1 to R3) and Xapiand `docs/design/phase7c.md` D4.
+> Status: CURRENT (2026-10-30) `WorkPool` at threadpool main `e961e44`; the design is the research note `docs/research/scheduler.md` (R1 to R3) and Xapiand `docs/design/phase7c.md` D4.
 
 # WorkPool
 
@@ -71,8 +71,8 @@ pool uses no CPU.
 Measured in the research note: per-group FIFOs with deficit round robin are the only candidate
 that is fair at 1,000 and 10,000 groups (Jain's index 0.99) while one group alone still takes
 every core; per-worker deques steal fast but give no fairness or classes. A futex per worker
-with Tokio's wake rule cut an external post from 7.0 us to under 150 ns and idle CPU from 0.4%
-to 0.001% of a core. Aging is stamped per entry and not per pool: a pool-level "no merge served
+with Tokio's wake rule cut an external post from 7.0 us to 46 to 140 ns and idle CPU from 0.35 to
+0.47% to 0.0008% of a core (`docs/research/scheduler.md`, R1). Aging is stamped per entry and not per pool: a pool-level "no merge served
 for T" rule serves one entry per interval and leaves a backlog of overdue merges waiting.
 
 ## Invariants
