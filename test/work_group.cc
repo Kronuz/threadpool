@@ -479,6 +479,130 @@ int main() {
 		std::printf("work_group OK: 200 pools and 800 groups churned without a hang or a use after free\n");
 	}
 
+	// ---- 17. Every cancel path frees the queued boxed items and leaves the owner's (L2-B5). ----
+	{
+		static std::atomic<int> live{0};
+		struct Tracked {
+			Tracked() { live.fetch_add(1); }
+			Tracked(const Tracked&) { live.fetch_add(1); }
+			~Tracked() { live.fetch_sub(1); }
+		};
+		struct Plain : WorkItem {
+			std::atomic<int>* ran;
+		};
+		std::atomic<int> ran{0};
+		std::vector<Plain> plain(3);
+		for (auto& p : plain) {
+			p.ran = &ran;
+			p.run = [](WorkItem* w) noexcept { static_cast<Plain*>(w)->ran->fetch_add(1); };
+		}
+		for (int path = 0; path < 3; ++path) {
+			WorkPool pool({.threads = 2});
+			std::atomic<bool> started{false};
+			std::size_t returned = 0;
+			std::size_t dropped = 0;
+			{
+				WorkGroup group(pool, 1);
+				group.enqueue([&] {
+					started = true;
+					while (!group.stop_requested()) {  // the cancel ends it
+						std::this_thread::yield();
+					}
+				});
+				spin_until([&] { return started.load(); });
+				for (int i = 0; i < 5; ++i) {
+					group.enqueue([t = Tracked()] {});
+					if (i < 3) {
+						group.post(plain[i]);
+					}
+				}
+				assert(live.load() == 5);
+				if (path == 0) {
+					dropped = group.cancel_and_wait();
+					assert(live.load() == 0);
+				} else if (path == 1) {
+					for (WorkItem* item = group.cancel(); item; item = item->next) {
+						assert(item == &plain[returned]);
+						++returned;
+					}
+					assert(live.load() == 0);
+					group.wait();
+				}
+			}  // path 2: the destructor cancels
+			assert(live.load() == 0);
+			assert(ran.load() == 0);
+			assert(path != 0 || dropped == 8);
+			assert(path != 1 || returned == 3);
+		}
+		std::printf("work_group OK: cancel(), cancel_and_wait() and the destructor all free queued boxes, leave the owner's\n");
+	}
+
+	// ---- 18. Work conservation (L2-B6): a worker that idles while a group has queued items
+	// under its width takes one, even when no turn of that group ends meanwhile. ----
+	{
+		const auto limit = 10s;
+		// (a) One group of long items runs as wide as the pool, from 1 to 8 workers.
+		for (unsigned n = 1; n <= 8; ++n) {
+			for (int rep = 0; rep < 20; ++rep) {
+				WorkPool pool({.threads = n, .reserve = 0});
+				WorkGroup group(pool);
+				std::atomic<unsigned> now{0};
+				std::atomic<unsigned> peak{0};
+				const auto end = std::chrono::steady_clock::now() + limit;
+				for (int i = 0; i < 64; ++i) {
+					group.enqueue([&] {
+						auto k = now.fetch_add(1) + 1;
+						for (auto p = peak.load(); k > p && !peak.compare_exchange_weak(p, k);) {
+						}
+						while (peak.load() < n && std::chrono::steady_clock::now() < end) {
+							std::this_thread::yield();
+						}
+						now.fetch_sub(1);
+					});
+				}
+				group.wait();
+				assert(peak.load() == n);
+			}
+		}
+		// (b) Posted while every worker is busy, so nothing could be granted a worker then:
+		// the others finish their items and the group widens with no turn of its own ending.
+		for (int rep = 0; rep < 50; ++rep) {
+			WorkPool pool({.threads = 4, .reserve = 0});
+			WorkGroup holders(pool);
+			WorkGroup group(pool);
+			std::atomic<unsigned> held{0};
+			std::atomic<bool> release{false};
+			const auto end = std::chrono::steady_clock::now() + limit;
+			for (int i = 0; i < 3; ++i) {
+				holders.enqueue([&] {
+					held.fetch_add(1);
+					while (!release && std::chrono::steady_clock::now() < end) {
+						std::this_thread::yield();
+					}
+				});
+			}
+			spin_until([&] { return held.load() == 3; });
+			std::atomic<unsigned> now{0};
+			std::atomic<unsigned> peak{0};
+			for (int i = 0; i < 16; ++i) {
+				group.enqueue([&] {
+					auto k = now.fetch_add(1) + 1;
+					for (auto p = peak.load(); k > p && !peak.compare_exchange_weak(p, k);) {
+					}
+					release = true;
+					while (peak.load() < 4 && std::chrono::steady_clock::now() < end) {
+						std::this_thread::yield();
+					}
+					now.fetch_sub(1);
+				});
+			}
+			group.wait();
+			holders.wait();
+			assert(peak.load() == 4);
+		}
+		std::printf("work_group OK: groups of long items ran as wide as the pool at 1 to 8 workers, and widened as workers freed up\n");
+	}
+
 	std::printf("all work_group tests passed\n");
 	return 0;
 }

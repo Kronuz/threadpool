@@ -458,6 +458,48 @@ int main() {
 		std::printf("work_wait OK (I4): three parked waiters on a width-1 group were all woken when it went idle\n");
 	}
 
+	// ---- I4 liveness. A lane becoming helpable wakes its parked waiters even though the group
+	// is not idle. Three workers, Z -> Y -> G acyclic. G (width 1) runs g1 for 300 ms with g2
+	// queued; Y's item y1 and W's item w1 wait on G and park (G's width is held); then z2 waits
+	// on Y and parks the third worker (Y's width is held by y1). When g1's turn ends with g2
+	// queued, the ticket is relisted, but every worker is parked: only the wake at the end of
+	// the turn lets y1 or w1 serve g2. ----
+	if (want("I4")) {
+		Watchdog dog(30, "I4 liveness");
+		WorkPool pool({.threads = 3, .reserve = 0});
+		WorkGroup g(pool, 1);
+		WorkGroup y(pool, 1);
+		WorkGroup w(pool);
+		WorkGroup z(pool);
+		std::atomic<bool> g1_started{false};
+		std::atomic<bool> y1_running{false};
+		std::atomic<bool> w1_running{false};
+		std::atomic<bool> g2_done{false};
+		g.enqueue([&] {
+			g1_started = true;
+			std::this_thread::sleep_for(300ms);
+		}, WorkClass::query);
+		g.enqueue([&] { g2_done = true; }, WorkClass::query);
+		assert(wait_for([&] { return g1_started.load(); }, 5000ms));
+		y.enqueue([&] {
+			y1_running = true;
+			g.wait();
+		}, WorkClass::query);
+		w.enqueue([&] {
+			w1_running = true;
+			g.wait();
+		}, WorkClass::query);
+		assert(wait_for([&] { return y1_running.load() && w1_running.load(); }, 5000ms));
+		std::this_thread::sleep_for(50ms);  // both parked on G
+		z.enqueue([&] { y.wait(); }, WorkClass::query);
+		z.wait();
+		y.wait();
+		w.wait();
+		g.wait();
+		assert(g2_done.load());
+		std::printf("work_wait OK (I4 liveness): g2 ran when g1's turn ended with every worker parked on a wait\n");
+	}
+
 	// ---- I5. Bounded resources: a wait creates no thread and inline depth is the program's
 	// nesting. 20,000 items of G each fan out to a child group of their own and wait for it;
 	// the process keeps its threads throughout and no stack holds more than two items. ----
@@ -682,6 +724,51 @@ int main() {
 		t_loop = false;
 		assert(guard_hits.load() == 0);
 		std::printf("work_wait OK (AL2): on_idle fired at once on an idle group, once on the idle-making thread otherwise, 2,000 under load, cancel_idle held, the guard untouched\n");
+	}
+
+	// ---- AL2. A node linked when its group is destroyed fires before the destructor
+	// returns; a cancel_idle racing the firing returns true only when the node never fires
+	// (and it fires exactly once otherwise). ----
+	if (want("AL2")) {
+		Watchdog dog(120, "AL2 lifetime");
+		struct Node : WorkIdle {
+			std::atomic<int> fired{0};
+		};
+		auto fire = [](WorkIdle* node) noexcept { static_cast<Node*>(node)->fired.fetch_add(1, std::memory_order_release); };
+		WorkPool pool({.threads = 3});
+		long cancelled = 0;
+		long fired = 0;
+		for (int i = 0; i < 2000; ++i) {
+			WorkGroup g(pool);
+			Node node;
+			node.fn = fire;
+			g.enqueue([] {});
+			g.on_idle(node);
+			bool unlinked = false;
+			std::thread t([&] {
+				unlinked = g.cancel_idle(node);
+				while (!unlinked && node.fired.load(std::memory_order_acquire) == 0) {
+					std::this_thread::yield();
+				}
+			});
+			t.join();
+			assert(node.fired.load() == (unlinked ? 0 : 1));
+			++(unlinked ? cancelled : fired);
+		}
+		assert(cancelled + fired == 2000);
+		for (int i = 0; i < 2000; ++i) {
+			auto* node = new Node;  // freed once it has fired, after the group is gone
+			node->fn = fire;
+			{
+				WorkGroup g(pool);
+				g.enqueue([] { std::this_thread::yield(); });
+				g.enqueue([] {});
+				g.on_idle(*node);
+			}
+			assert(wait_for([&] { return node->fired.load(std::memory_order_acquire) == 1; }, 10000ms));
+			delete node;
+		}
+		std::printf("work_wait OK (AL2 lifetime): cancel_idle raced the firing 2,000 times (%ld cancelled, %ld fired once); 2,000 groups destroyed with a node linked fired it\n", cancelled, fired);
 	}
 
 	// ---- I6. Progress on random acyclic graphs: 50 groups of widths 0 to 3, three classes,

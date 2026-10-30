@@ -306,8 +306,6 @@ public:
 		_sleepers.reserve(n);
 	}
 
-	unsigned num_unparked() const noexcept { return unparked(_state.load(std::memory_order_relaxed)); }
-
 	// After a post: wakes one sleeper when nobody searches. The post must be a seq_cst RMW
 	// the parker's final check reads, so this load and to_parked()'s RMW are in one total
 	// order: either the post sees the parker or the parker sees the post.
@@ -474,7 +472,7 @@ struct alignas(64) GroupState {
 // The ready-list: Vyukov's bounded MPMC ring of group pointers, chained so it grows as
 // groups open and a post never blocks: a larger ring becomes the tail, the old one drains
 // first, and retired rings live until the pool ends. Each entry is one listed ticket, so
-// reserve() keeps room for (live groups + extra tickets).
+// reserve() keeps room for the live groups.
 class ReadyRing {
 	static constexpr std::size_t closed = std::size_t(1) << (sizeof(std::size_t) * 8 - 1);
 
@@ -750,7 +748,6 @@ private:
 	std::atomic<bool> _stop{false};
 	alignas(64) std::atomic<unsigned> _busy_bg{0};     // workers in flush or merge turns
 	alignas(64) std::atomic<unsigned> _busy_merge{0};  // workers in merge turns
-	alignas(64) std::atomic<unsigned> _extras[threadpool_detail::classes] = {};  // tickets beyond each lane's first; each at most _n
 	alignas(64) std::atomic<std::uint64_t> _aged{0};   // merge turns picked ahead of flush for their age
 	alignas(64) std::atomic<std::size_t> _states{1};   // group states alive, the pool's own included
 	alignas(64) std::atomic<std::uint32_t> _group_wake{0};  // WorkGroup::wait()'s futex word
@@ -770,7 +767,7 @@ private:
 
 	void reserve_rings(std::size_t states) {
 		for (auto& ring : _ready) {
-			ring.reserve(states + _n + 1);
+			ring.reserve(states + 1);
 		}
 	}
 
@@ -778,46 +775,23 @@ private:
 		return s.width && s.width < _n ? s.width : _n;
 	}
 
-	// Whether a worker could take one more turn of class c: queries may use any idle
-	// worker, flushes and merges only those beyond the reserve, merges at most merge_cap.
-	bool spare(unsigned c) const noexcept {
-		auto unparked = _idle.num_unparked();
-		if (c == query) {
-			return unparked < _n;
-		}
-		if (unparked >= _bg_cap || _busy_bg.load(std::memory_order_relaxed) >= _bg_cap) {
-			return false;
-		}
-		return c != merge || _busy_merge.load(std::memory_order_relaxed) < _merge_cap;
-	}
-
-	// Under s.mu: whether lane c of s may take one more ring ticket. Its first is free;
-	// more need queued work beyond its tickets, room under its width, a spare worker, and
-	// one of the class's _n extras (more than one per worker could never run at once).
+	// Under s.mu: lists one more ticket of lane c when it has queued items, none listed, and
+	// room under its width. At most one ticket of a lane is listed, so a ring holds at most
+	// one entry per lane; the worker that pops it lists the next (turn()) while items remain,
+	// so a lane widens to its width as workers come free, with no count of idle workers.
 	bool grant(GroupState& s, unsigned c) noexcept {
 		Lane& l = s.lanes[c];
-		if (l.tickets + l.helpers == 0) {
+		if (l.pending && l.listed == 0 && l.tickets + l.helpers < cap(s)) {
+			++l.tickets;
+			++l.listed;
 			return true;
 		}
-		if (l.pending <= l.tickets || l.tickets + l.helpers >= cap(s) || !spare(c)) {
-			return false;
-		}
-		if (l.tickets == 0) {
-			return true;  // a helper serves it; this is the ring's first
-		}
-		// relaxed: a counter for the ring's bound; the ticket itself is published under s.mu.
-		if (_extras[c].fetch_add(1, std::memory_order_relaxed) >= _n) {
-			_extras[c].fetch_sub(1, std::memory_order_relaxed);
-			return false;
-		}
-		return true;
+		return false;
 	}
 
-	// Under s.mu: gives back one ring ticket of lane c.
-	void drop(GroupState& s, unsigned c) noexcept {
-		if (s.lanes[c].tickets-- > 1) {
-			_extras[c].fetch_sub(1, std::memory_order_relaxed);
-		}
+	// Under s.mu: gives back one ticket of lane c.
+	static void drop(GroupState& s, unsigned c) noexcept {
+		--s.lanes[c].tickets;
 	}
 
 	// Under s.mu: whether the group has nothing queued and nothing running.
@@ -856,22 +830,19 @@ private:
 	}
 
 	// After unlocking s: what its critical section decided. The common case is inline.
-	void release(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
-		if (push | extra | wake | free) {
-			release_slow(s, c, push, extra, wake, free);
+	void release(GroupState* s, unsigned c, bool push, bool wake, bool free) noexcept {
+		if (push | wake | free) {
+			release_slow(s, c, push, wake, free);
 		}
 	}
 
-	[[gnu::noinline]] void release_slow(GroupState* s, unsigned c, bool push, bool extra, bool wake, bool free) noexcept {
+	[[gnu::noinline]] void release_slow(GroupState* s, unsigned c, bool push, bool wake, bool free) noexcept {
 		// A merge entry is stamped for aging; the clock is read only for merges.
 		auto stamp = c == merge ? std::max<std::uint64_t>(threadpool_detail::ticks(), 1) : 0;
 		if (push) {
 			_ready[c].push(s, stamp);
 		}
-		if (extra) {
-			_ready[c].push(s, stamp);
-		}
-		if (push || extra) {
+		if (push) {
 			_idle.notify_one();
 		}
 		if (wake) {
@@ -892,7 +863,7 @@ private:
 	}
 
 	// Under s.mu with a ticket of lane c held (a ring ticket, or a helper's): one turn, a
-	// quantum of service plus the lane's debt, then requeue, keep, or drop the ticket.
+	// quantum of service plus the lane's debt, then relist, keep, or drop the ticket.
 	// Returns with s.mu released.
 	void turn(GroupState& s, unsigned c, bool helper) noexcept {
 		Lane& l = s.lanes[c];
@@ -900,6 +871,7 @@ private:
 		l.deficit = 0;
 		auto& here = threadpool_detail::tls_here;
 		auto t = threadpool_detail::ticks();
+		bool first = true;
 		while (budget > 0) {
 			WorkItem* item = l.pop();
 			if (!item) {
@@ -908,7 +880,14 @@ private:
 			++s.running;
 			// relaxed: stop_requested() is advisory, read relaxed like TaskGroupStopToken.
 			item->epoch = s.epoch.load(std::memory_order_relaxed);
+			// Items remain and no ticket is listed: list one before running, so a worker that
+			// idles now serves the lane beside this one, however long this item runs.
+			bool relay = first && grant(s, c);
+			first = false;
 			s.mu.unlock();
+			if (relay) {
+				release(&s, c, true, false, false);
+			}
 			run_item(here, s, item);
 			auto now = threadpool_detail::ticks();
 			budget -= static_cast<std::int64_t>(now - t);
@@ -917,7 +896,6 @@ private:
 			--s.running;
 		}
 		bool push = false;
-		bool extra = false;
 		if (helper) {
 			--l.helpers;
 		}
@@ -931,30 +909,19 @@ private:
 				l.deficit += budget;
 			}
 			if (helper) {
-				// A helper's ticket never joins the ring, unless the lane would have none.
-				if (l.tickets == 0) {
-					++l.tickets;
-					++l.listed;
-					push = true;
-				}
-			} else if (l.tickets > 1 && _ready[c].size() > l.listed) {
-				drop(s, c);  // other groups wait: an extra ticket goes back, so shares even out
-			} else {
+				push = grant(s, c);  // a helper's ticket never joins the ring
+			} else if (l.listed == 0) {
 				++l.listed;
 				push = true;
-				// One more per quantum while workers idle: an index alone fans out to every core.
-				if (grant(s, c)) {
-					++l.tickets;
-					++l.listed;
-					extra = true;
-				}
+			} else {
+				drop(s, c);  // the lane is listed already
 			}
 		}
 		bool wake = waiters_due(s);
 		WorkIdle* notify = take_idle(s);
 		bool free = !s.owned && s.unreferenced();
 		s.mu.unlock();
-		release(&s, c, push, extra, wake, free);
+		release(&s, c, push, wake, free);
 		if (notify) [[unlikely]] {
 			fire_idle(notify);
 		}
@@ -971,7 +938,7 @@ private:
 			drop(s, c);
 			bool free = !s.owned && s.unreferenced();
 			s.mu.unlock();
-			release(&s, c, false, false, false, free);
+			release(&s, c, false, false, free);
 			return;
 		}
 		turn(s, c, false);
@@ -1230,16 +1197,12 @@ public:
 		s.mu.lock();
 		l.push(&item);
 		bool push = grant(s, c);
-		if (push) {
-			++l.tickets;
-			++l.listed;
-		}
 		bool wake = s.waiters != 0;
 		if (wake) {
 			_group_wake.fetch_add(1, std::memory_order_release);  // a waiting owner may help
 		}
 		s.mu.unlock();
-		release(&s, c, push, false, wake, false);
+		release(&s, c, push, wake, false);
 	}
 
 	// Sleeps until deadline, returning true, or until group is cancelled, returning false
@@ -1294,6 +1257,54 @@ class WorkGroup {
 		}
 	}
 
+	// The one place cancelled items are dealt with (cancel(), cancel_and_wait() and the
+	// destructor): unlinks the queued items, frees the boxed ones unrun and returns the
+	// caller-owned ones through `next`. `dropped` counts both.
+	WorkItem* cancel_items(std::size_t& dropped) noexcept {
+		WorkItem* list = nullptr;
+		WorkItem** tail = &list;
+		_s->mu.lock();
+		for (auto& l : _s->lanes) {
+			if (l.head) {
+				*tail = l.head;
+				tail = &l.tail->next;
+			}
+			l.head = nullptr;
+			l.tail = nullptr;
+			l.pending = 0;
+		}
+		// relaxed: under mu; readers check it advisorily, and sleep's release orders it.
+		_s->epoch.fetch_add(1, std::memory_order_relaxed);
+		// release: a sleeper that sees the new word sees the new epoch.
+		_s->sleep.fetch_add(1, std::memory_order_release);
+		bool wake = _pool->waiters_due(*_s);
+		WorkIdle* notify = WorkPool::take_idle(*_s);
+		_s->mu.unlock();
+		threadpool_detail::futex_wake_all(&_s->sleep);
+		// Boxed items are freed before the group's waiters and idle nodes hear it is idle.
+		WorkItem* owned = nullptr;
+		WorkItem** keep = &owned;
+		dropped = 0;
+		for (WorkItem* item = list; item;) {
+			WorkItem* next = item->next;
+			++dropped;
+			if (item->flags & threadpool_detail::item_boxed) {
+				auto* box = static_cast<threadpool_detail::BoxedItem*>(item);
+				box->destroy(box);
+			} else {
+				*keep = item;
+				keep = &item->next;
+			}
+			item = next;
+		}
+		*keep = nullptr;
+		if (wake) {
+			threadpool_detail::futex_wake_all(&_pool->_group_wake);
+		}
+		WorkPool::fire_idle(notify);
+		return owned;
+	}
+
 public:
 	explicit WorkGroup(WorkPool& pool, unsigned width = 0, unsigned weight = 1) :
 		_pool(&pool),
@@ -1318,14 +1329,8 @@ public:
 	// race other calls.
 	~WorkGroup() noexcept {
 		check_stack("WorkGroup::~WorkGroup");
-		for (WorkItem* item = cancel(); item;) {
-			WorkItem* next = item->next;
-			if (item->flags & threadpool_detail::item_boxed) {
-				auto* box = static_cast<threadpool_detail::BoxedItem*>(item);
-				box->destroy(box);
-			}
-			item = next;
-		}
+		std::size_t dropped;
+		cancel_items(dropped);
 		wait();
 		_s->mu.lock();
 		_s->owned = false;
@@ -1363,36 +1368,13 @@ public:
 		return true;
 	}
 
-	// Unlinks the queued items that have not started and returns them as a list through
-	// `next`, queries then flushes then merges, each oldest first, for the owner to free
-	// or recycle; running items see stop_requested() turn true. Items posted afterwards
-	// run normally.
+	// Drops the queued items that have not started: boxed ones are freed unrun, caller-owned
+	// ones come back as a list through `next`, queries then flushes then merges, each oldest
+	// first, for the owner to free or recycle. Running items see stop_requested() turn true.
+	// Items posted afterwards run normally.
 	WorkItem* cancel() noexcept {
-		WorkItem* list = nullptr;
-		WorkItem** tail = &list;
-		_s->mu.lock();
-		for (auto& l : _s->lanes) {
-			if (l.head) {
-				*tail = l.head;
-				tail = &l.tail->next;
-			}
-			l.head = nullptr;
-			l.tail = nullptr;
-			l.pending = 0;
-		}
-		// relaxed: under mu; readers check it advisorily, and sleep's release orders it.
-		_s->epoch.fetch_add(1, std::memory_order_relaxed);
-		// release: a sleeper that sees the new word sees the new epoch.
-		_s->sleep.fetch_add(1, std::memory_order_release);
-		bool wake = _pool->waiters_due(*_s);
-		WorkIdle* notify = WorkPool::take_idle(*_s);
-		_s->mu.unlock();
-		threadpool_detail::futex_wake_all(&_s->sleep);
-		if (wake) {
-			threadpool_detail::futex_wake_all(&_pool->_group_wake);
-		}
-		WorkPool::fire_idle(notify);
-		return list;
+		std::size_t dropped;
+		return cancel_items(dropped);
 	}
 
 	// Blocks until the group has nothing queued and nothing running. On a worker the caller
@@ -1463,12 +1445,12 @@ public:
 		return found;
 	}
 
+	// Drops the queued items as cancel() does (the caller-owned ones are not returned), then
+	// waits as wait() does; returns how many queued items it dropped.
 	std::size_t cancel_and_wait() noexcept {
 		check_stack("WorkGroup::cancel_and_wait");
-		std::size_t dropped = 0;
-		for (WorkItem* item = cancel(); item; item = item->next) {
-			++dropped;
-		}
+		std::size_t dropped;
+		cancel_items(dropped);
 		wait();
 		return dropped;
 	}

@@ -125,8 +125,9 @@ index.wait();
 - `post(WorkItem&)` — set `item.group` and post it.
 - `enqueue(func, WorkClass = flush) -> bool` — box `func()` or `func(const WorkItem&)` and
   post it; `false` if the box cannot be allocated. Exceptions go to `L_EXC`.
-- `cancel() -> WorkItem*` — unlink the queued items and return them through `next`,
-  queries, then flushes, then merges, each oldest first; running items see
+- `cancel() -> WorkItem*` — drop the queued items: boxed ones (from `enqueue`) are freed
+  unrun, and the caller-owned ones come back through `next`, queries, then flushes, then
+  merges, each oldest first, for the owner to free or recycle; running items see
   `stop_requested()`. Items posted afterwards run normally.
 - `wait()` — until nothing is queued and nothing runs. On a worker the caller serves the
   group meanwhile, inline on its own stack, as a helper within `width`, and nothing else:
@@ -140,8 +141,10 @@ index.wait();
   coroutine, wakes a loop) and never blocks; it may free its node. `cancel_idle` unlinks
   a node that has not fired and returns `false` when it did. No `block_guard`: it never
   waits. Which node fires first is unspecified.
-- `cancel_and_wait() -> size_t`, `stop_requested()` (for the innermost item of this group
-  on this thread's stack), `set_width()`, `set_weight()`, `pool()`.
+- `cancel_and_wait() -> size_t` — `cancel()` (boxed items freed, caller-owned ones dropped
+  unrun and left to their owner), then `wait()`; returns how many queued items it dropped.
+- `stop_requested()` (for the innermost item of this group on this thread's stack),
+  `set_width()`, `set_weight()`, `pool()`.
 - `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are
   left to their owner, who calls `cancel()` first to get them back), then wait. From one
   of the group's own items it aborts, as `wait()` does.

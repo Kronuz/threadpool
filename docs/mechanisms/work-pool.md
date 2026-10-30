@@ -11,7 +11,7 @@ pool uses no CPU.
 
 ```
  post(item) --> group lane[class] (FIFO, group's spinlock)
-                  | first ticket free; more while idle workers exist
+                  | one ticket listed per lane; the popper lists the next
                   v
         ready ring[class] (MPMC ring of tickets)  <-- query, flush, merge
                   |  pick(): query, [overdue merge], flush, merge
@@ -22,10 +22,13 @@ pool uses no CPU.
 - **Lanes and rings.** A group has a lane per class. A lane with queued work holds a ticket,
   its place on that class's ring; a worker pops a ticket, serves the lane for a turn (100 us of
   service by default, measured with the cycle counter), and pushes the ticket back at the tail
-  if work remains. Debt from an overrun is carried (deficit round robin). Extra tickets go to
-  a lane only while workers idle, at most one per worker per class, and retire when other
-  groups wait, so one group alone takes every worker and many busy groups converge on equal
-  shares. Rings are chained and grow when a group opens, so a post never blocks.
+  if work remains. Debt from an overrun is carried (deficit round robin). A lane has at most
+  one ticket on the ring, so a ring holds at most one entry per lane and a post never blocks.
+  The worker that pops it lists the next one before it runs its first item, while items
+  remain and fewer than `width` tickets and helpers exist, and a post lists one when none is
+  listed. A lane so widens to its width as workers come free, one hand-off at a time, and a
+  group alone takes every worker; many busy groups take turns off the ring in order, so they
+  converge on equal shares. Rings are chained and grow when a group opens.
 - **Classes and the reserve.** `pick()` takes the query ring first. A flush or merge turn
   holds one of `threads - reserve` background slots (an RMW before the pop, so the cap is
   exact), merges also one of `merge_cap`. The reserve workers wait for queries only: a query
@@ -59,6 +62,9 @@ pool uses no CPU.
   last searcher wakes the next, the last to park checks the rings again.
 - **Lifetime.** A group's state outlives its `WorkGroup` until its last ticket leaves the
   ring; the destructor cancels, frees queued boxed items and waits for running ones.
+  `cancel()`, `cancel_and_wait()` and the destructor drop queued items in one place
+  (`WorkGroup::cancel_items`): boxed ones are freed unrun, caller-owned ones are handed
+  back through `cancel()` and otherwise stay with their owner (`test/work_group.cc` case 17).
 
 ## Why this mechanism
 
@@ -71,8 +77,18 @@ for T" rule serves one entry per interval and leaves a backlog of overdue merges
 
 ## Invariants
 
-- Every ring entry is one listed ticket of one lane; a lane with queued work holds one (the
-  churn and ping-pong cases in `test/work_group.cc`, `test/work_pool.cc`).
+- Every ring entry is one listed ticket of one lane, and a lane has at most one (the churn and
+  ping-pong cases in `test/work_group.cc`, `test/work_pool.cc`).
+- Work conservation. A lane with queued items and fewer than `width` tickets and helpers
+  always has a ticket on the ring or a turn about to list one: a post lists one when none
+  is listed; the worker that pops the ticket lists the next before it runs its first item;
+  a turn that ends with items left lists its own. So a worker that idles while a lane
+  could take another turn finds a ticket, however long the lane's running items run, and no
+  count of idle workers decides it (a count read at post time went stale: workers the wake
+  chain had just woken counted as busy, found nothing, and parked, leaving the lane
+  narrower than its width until a turn ended). `test/work_group.cc` case 18: one group of
+  long items runs as wide as the pool at 1 to 8 workers, and a group posted while every
+  worker is busy widens as they free up; the mutant that restores the count dies there.
 - Background turns never exceed `threads - reserve`, merges never `merge_cap`, aged ones
   included (`test/work_scheduling.cc` cases 2 and 3; mutants that bypass either die). A
   worker inside a `wait()` serves the awaited group without a slot, so waiting workers can
