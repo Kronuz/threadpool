@@ -41,12 +41,17 @@ int main() {
 		WorkGroup group(pool);
 		std::atomic<unsigned> now{0};
 		std::atomic<unsigned> peak{0};
+		const auto end = std::chrono::steady_clock::now() + 10s;  // one deadline for the whole case
 		for (int i = 0; i < 64; ++i) {
 			group.enqueue([&] {
 				auto n = now.fetch_add(1) + 1;
 				for (auto p = peak.load(); n > p && !peak.compare_exchange_weak(p, n);) {
 				}
-				burn(5ms);
+				// Holds the worker until all four run at once (or 10 s pass), so a slow host cannot drain the
+				// queue on fewer workers before the last one wakes.
+				while (peak.load() < 4 && std::chrono::steady_clock::now() < end) {
+					std::this_thread::yield();
+				}
 				now.fetch_sub(1);
 			});
 		}
