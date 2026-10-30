@@ -63,7 +63,7 @@
     header); a full Xapiand build was not run (it includes only `threadpool.hh` and `thread.cc`, unchanged).
     Nothing broke. reactor does not link threadpool.
   - [x] L2-9. `cpp-libraries/tools/preflight.sh`: mac-hardened ok, mac-asan-ubsan ok, linux ok (`_GLIBCXX_ASSERTIONS`), freebsd ok; the VMs ran at `--parallel 2` under a light hold (a copy of the script without its host check, since the script waits on the strict hold the VM rule asks for).
-  - [ ] L2-10. CI green on the pushed branch (the lead watches; see Next).
+  - [ ] L2-10. CI green on the pushed branch: run 40981849396 (workflow_dispatch; the workflow has no push trigger for this prefix) was queued when I stopped, no job result yet. The lead watches.
 - Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs
   commit after it (README untouched; API, ARCHITECTURE, AGENTS, `docs/mechanisms/work-pool.md`, this ledger and
   the K data).
