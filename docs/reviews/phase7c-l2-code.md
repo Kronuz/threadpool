@@ -399,3 +399,55 @@ Re-checker, 2026-10-29. Subject: `threadpool:7a1a5c5` through `threadpool:294783
 **Do not land.** L2-B2, L2-N1, AL1, AL2, AR1, AR2 are closed; L2-B5 (cancel_and_wait leaks boxed items) and L2-B6 (work-conservation gap that fails `work_group` case 1 on slow runners) are open, and I4b needs a test.
 
 Not run: Linux, FreeBSD and arm64 builds; CI logs; any benchmark or K rerun; consumer rebuilds; the `stress.cc` probes of the first review (superseded by I1 to I6 and `deep.cc`); a revert check for B5/B6 (no fix exists); an enqueue-before-start reproduction of B6.
+
+## Re-check 3
+
+Re-checker, 2026-10-29. Subject: `threadpool:e28a89c` (B5, B6) and `threadpool:3e6e585` (ledger L2-14); worktree `l2-scheduler`, clean at `3e6e585`. Read `work_pool.hh` `grant`/`drop`/`turn`/`serve`/`helpable`
+(`:778-960`), `cancel_items`, `cancel()`, `cancel_and_wait()`, `~WorkGroup`, `test/work_group.cc` cases 17 and 18, and the K data in `docs/status/phase7c-l2/k-b6/` and `k-ruled/`.
+Probes in `.scratch/rc3/` (`b5.cc` is strata's probe unchanged, `c17.cc`/`rv2.py`, `p.cc` modes width/widthwait/fair/lost/herd, `ws_inst.cc`, `ctl.cc`, `wc` from `.scratch/rc2/wc.cc`).
+Builds under `quiet light` (at most 3 jobs): TSan (`-O1`) and ASan+UBSan (Homebrew LLVM 23), both from `.scratch/rc2/san.sh`; all 7 CTest targets pass in each on this head.
+
+### Verdicts
+
+- **L2-B5 CLOSED.** `cancel()`, `cancel_and_wait()` and `~WorkGroup` all call `cancel_items()` (`work_pool.hh:1260-1306`), which frees boxed items unrun (`box->destroy`) before the group's waiters and idle nodes are
+  told it is idle, and returns caller-owned ones through `next`. Strata's probe (`workgroup_cancel_and_wait_leak.cc`, byte-identical to `.scratch/rc2/b5.cc`) under ASan+UBSan with `detect_leaks=1`: `queued live=5`,
+  `dropped=5 live after cancel_and_wait=0`, no LeakSanitizer report (Re-check 2 showed `live=5` and a leak). Revert check of case 17: `.scratch/rc3/rv2.py` runs case 17 alone (`c17.cc`, extracted from `work_group.cc:482-523`) against three copies of the
+  header that each stop freeing boxes on one path: "cancel_and_wait keeps boxes" dies on `live == 0` (c17.cc:50), "cancel keeps boxes" dies on the returned-list order (:53), "destructor keeps boxes" dies on `live == 0` (:60); the unmutated control passes.
+  (A first attempt ran the whole `work_group` binary under ASan on a loaded host and timed out at 300 s on the first mutant; that was the host, not the mutant, and is why the case is run alone.)
+- **L2-B6 CLOSED.** The design is sound and I could not break it.
+  - **Work conservation.** `.scratch/rc2/wc.cc` rebuilt (`-O2`), 14 CPU burners (load 10 to 12 on 16 CPUs), 80 repetitions at each of 1 to 8 workers (640 runs): `peak < workers` in 0 of 640; plus TSan at 2, 4 and 8 workers, 40 each (120): 0 of 120. Re-check 2 read 15 to 19 of 300 on the previous head at 4 workers.
+    Mutant "relay removed" (`bool relay = false && first && grant(s, c);`, `.scratch/rc3/mrelay/`): 98 of 100 at 4 workers and 100 of 100 at 8 fail, so the pop-then-list rule is what carries the property and `wc` exercises it.
+  - **Width.** By construction: `grant` lists only when `tickets + helpers < cap(s)` and `listed == 0` (`:782-789`), the relay is the same call, and a pop moves a ticket from listed to running without changing `tickets`, so `tickets + helpers <= cap` always. Measured (`p.cc width`, 165 runs: 2/4/8 workers x widths 1,2,3,4,8, 64 items): peak above width 0, below width 0 (plain and TSan).
+    `p.cc widthwait` (120 runs, widths 1 to 3: four worker waiters plus a non-worker waiter plus the owner all helping): over width 0, plain and TSan.
+  - **Fairness.** `p.cc fair` (4 workers, two saturated groups of self-reposting 50 us items, 3 s): weights 1:1 share 0.998, weights 1:3 share 2.979 (expect 3). The DRR path (`budget`, `deficit`) is unchanged by `e28a89c`; `work_scheduling` passes under both sanitizers. K2's 1.04 is the ledger's number; not rerun.
+  - **No lost wakeup.** `p.cc lost` (a post races the end of a turn on its last item): external serial post-then-wait 20,000, an item that posts its successor from inside itself 20,000, two posters 40,000, each at 1/2/4 workers and widths 0 and 1 (6 configs), plain 20,000 iterations and TSan 3,000: all items ran, no watchdog hang.
+    By reading: `post` and the end of `turn` take `s.mu`, so a post either lands before the turn's final `pop` (the turn takes it) or after the turn's `drop` (the post sees `tickets` lowered and lists). The relay's `release` pushes after `unlock`, but the group is held alive by `tickets` and `running`.
+  - **No herd.** One `grant` per `pop` (the relay) plus one relist at a turn's end, and `listed <= 1` per lane, so a ring holds at most one entry per lane and `reserve(states + 1)` is enough. Counters in an instrumented copy (`.scratch/rc3/inst2`, `p_cnt herd`):
+    one post to 8 parked workers wakes 2 (the post and the Tokio ramp wake), 8 long items on 8 workers wake 8, `pushes == serves` in every row, and `wakes < pushes` throughout (e.g. 64 long items, 8 workers: 4,657 wakes for 15,974 pushes).
+    The high `serves` for long items (about 250 per item) is DRR debt being paid by empty turns; it is identical on the previous head (`threadpool:2947834`: 16,400 against 16,301 here for 64 x 20 ms items on 4 workers), so not new.
+  - **I1 to I6.** `.scratch/mutl2.py` rerun against this head: all 15 mutants killed (I1, I1b, I2a, I2b, I3a, I3b, I3c on `peak == 1` this time, I3d, I4, I4b on the new "I4 liveness" case, I5, AL2a to AL2d). TSan and ASan suites pass.
+- **K3 at reserve 2: noise or environment, not a B6 regression; no change needed, watch it at the gate.** The k-b6 reserve-2 p99 is higher than `k-ruled` in all three scenarios (hot group 151 against 61 us medians, busy 1,000 184 against 84, idle 10,000 139 against 55), ranges disjoint in two of them, so it is real in those runs.
+  It is not B6: (1) reserve 1 (`workpool`, the default) is unchanged run to run (hot 165 against 167, busy 179 against 158, idle 169 against 147 us), while only the reserve-2 rows moved; (2) in `.scratch/kab/` (old head and B6 interleaved, 6 samples each) the old head's reserve-2 p99 reads 134 us hot and 146 busy,
+  so the old binary no longer reproduces its own 61 and 84 on this host state; B6 reads 155 and 163; an exact permutation test on the medians gives p = 0.78 (hot) and 0.39 (busy), reserve 1 p = 0.99 and 0.31; (3) `k-ruled` was taken `exclusive` on macOS and `k-b6` under `strict`, which on macOS cannot pin cores. A B6 effect of up to about +15 to +20 us at reserve 2 cannot be excluded with 6 samples; it is within the spread (55 to 204 us) of a single configuration.
+  Mechanism check: B6 changes nothing for a query lane with one item per group; reserve is applied in `pick`/`ready_for_me`, which `e28a89c` did not touch.
+  Not rerun, per the brief.
+
+### Item 4 (CI): linux-tsan `work_scheduling.cc:150 assert(!in_time)`. Not a priority bug. The control is timing-dependent and fails on the previous head too; it needs a deterministic replacement, but it is not B6's.
+
+- Reproduced locally under TSan with 14 CPU burners: new head 2 of 20, 6 of 40 (instrumented copy), 7 of 40; previous head `threadpool:2947834` (before B6) 5 of 40 and 3 of 30, all `Assertion failed: (!in_time)` at the same line. Without load, 0 of 30.
+- Mechanism (`.scratch/rc3/ws_inst.cc` with a hook at the merge pick): `pick()` takes a merge without aging only after `_ready[flush].pop()` returned null (`work_pool.hh:1046-1050`; `merge_overdue()` is false with `merge_age = 0`). At those moments the flush ring held 30 entries (`size()` 30) and every pending flood group was listed
+  (`pending-unlisted=0`, 30 to 32 groups pending, 1 to 3 running), so the ring was not empty: `Ring::pop` returned null because the head cell's producer had claimed the slot (`enq` CAS) and not yet published `seq` (`:566`, "the next entry is still being published"). A producer descheduled in that window makes every consumer see an empty ring.
+  The control floods with self-reposting items, so pushes are continuous and one is in flight almost always; on a starved runner the window is wide enough to hit. B6 does not cause it (previous head fails equally), though B6 pushes somewhat more often (a post lists whenever `listed == 0`, including a self-repost during its own turn), which is why it can read slightly higher.
+- Verdict on the priority question: a merge can run ahead of listed flushes only while a flush push is mid-publish, which is a property of the Vyukov ring and bounded by that producer resuming; no path lets a merge jump over a pop that returned an entry. It does mean "flush before merge" is strict only for published entries; say so in `docs/mechanisms/work-pool.md` or close the window if strictness matters (pop could retry while `enq > deq`, at the cost of spinning on a descheduled producer; I would not).
+- Deterministic replacement for the control (probe `.scratch/rc3/ctl.cc`): 32 flush groups each post one item that waits on a gate, wait until 4 have started, post the merge, open the gate. No flush item reposts, so no push is in flight when the workers pick. Assert the merge starts after all but at most `threads - 1` flushes (a flush can be popped and not yet counted; the probe's strict "merge is 33rd" failed 2 of 300 and 1 of 1,500 for exactly that reason, `merge_at=32`), and `merges_aged() == 0`. A broken priority would put the merge near 5th.
+  The aging-on half (`in_time` true, `waited >= 15ms`, `merges_aged() >= 1`) is a positive wait with a 400 ms bound and is fine.
+
+### New findings
+
+- None against `e28a89c`/`3e6e585`. One line for the lead: `work_scheduling.cc` case 1's control (`:150`) needs the replacement above; it fails about 10 to 15 percent of the time on a starved host on the head before B6 as well.
+
+### Verdict
+
+**Land** after the case-1 control is replaced (or marked as not blocking: it is a test flake with a known cause, not a scheduler defect). L2-B5 and L2-B6 are CLOSED; the K3 reserve-2 reading is environment/noise; I1 to I6 hold.
+
+Not run: Linux, FreeBSD and arm64 builds; the CI logs themselves (the failure reproduced locally instead); any benchmark or K rerun; consumer rebuilds (strata, Xapiand); LSan on the full suite (only on strata's probe); an enqueue-before-start variant of B6.
