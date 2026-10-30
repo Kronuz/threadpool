@@ -8,7 +8,8 @@
 - Branch / worktree: `phase7c/l2-scheduler` at `~/code/Kronuz/threadpool-wt/l2-scheduler`, from
   `feature/scheduler` at `threadpool:5caedce`, which already sits on main `threadpool:394aaea` (the rebase
   was a no-op, so no history was rewritten; `feature/scheduler` is untouched).
-- State: rework done for `docs/reviews/phase7c-l2-code.md` (REJECT: B1 to B4, N1); re-check and CI are the lead's. Not merged.
+- State: the architect's ruling on B2 and N1 (AL1, AL2, AR2) is implemented; B1, B3 and B4 closed in the re-check; the re-check of
+  B2 and N1, CI and the K reruns' read are the lead's. Not merged.
 - Done criteria (the task's list; ticked with evidence):
   - [x] L2-1. K1 to K3 reruns on the final code. Data in `docs/status/phase7c-l2/`, Mac x86_64, 16 workers,
     strict hold, 5 trials, medians (range):
@@ -42,7 +43,8 @@
   - [x] L2-4. V2 (a worker waits on work queued only in its own group), case 6: every class pairing on 1 and 2
     workers with width 1, and ten nested waits on one worker, complete. It found a deadlock in `threadpool:5caedce`:
     the nested wait, and two items of one group waiting together, waited on each other forever; fixed
-    (`GroupState::suspended`, case 6 nested and 6b).
+    (`GroupState::suspended`, case 6 nested and 6b). Superseded by L2-12: an own-group wait now aborts, and V2 is
+    a worker waiting on a child group whose work is queued only there (case 6 in the same file).
   - [x] L2-5. V5 (a reactor calls a waiting entry), case 7: `Options::block_guard` is called on entry to
     `WorkGroup::wait()` and `help_until()` from a thread that is not a worker, before it can block; a worker's
     wait does not call it. Xapiand sets it to `engine::check_may_block`. See Decisions.
@@ -68,6 +70,7 @@
       a ring turn that finds a helper in its place gives its ticket up, so the width holds (test 6d at 1, 2, 4 threads x
       width 0 to 3, 6e peak 1 under 4 helpers). F1 (old rule) hangs 6d; F2 (no yield) fails 6e. Probes `width_xwait` at
       threads 1, 2, 4 and widths 0 to 3, and `stress_asan chain 2 4` and `chain 4 4`, pass.
+    - (B2 and N1 below are superseded by L2-12; B1, B3, B4 stand.)
     - B2 stack depth: `max_inline_depth` 64 per stack. Past it a waiter starts a rescue thread (one per 64 levels, a fresh
       stack) that serves the lanes the waiter could, and sleeps; it serves no other group's queries; `rescuers` keeps the
       group state alive and `~WorkPool` waits for the threads. Test 6f: 20,000 self-waiting items and a 300-group chain on
@@ -86,22 +89,76 @@
       sibling, which no rule can tell apart from the cases that need it, since 1 worker has nobody else). Test 6c keeps to
       rounds where both items really overlap.
     - N2 (guard entry sites), N3 (waiting workers beyond the caps) are written in API.md and `work-pool.md`.
+  - [x] L2-12. The architect's ruling on B2 and N1 (`docs/reviews/phase7c-l2-code.md`, "Architect ruling"), implemented in
+    `threadpool:7a1a5c5` and `threadpool:19a17d0`; tests in the new `test/work_wait.cc` (CTest `work_wait`), mutants in
+    `.scratch/mutl2.py` (each patches a copy of the header, builds, expects failure):
+    - AL1. `wait()` serves only the group it waits on, inline, as a helper within `width`; no query, no other group, no
+      thread. `tls_here.top` is a chain of frames (group, item, parent); `wait()`, `cancel_and_wait()` and `~WorkGroup`
+      on a group in the chain abort after naming the site, in every build. Deleted: rescue threads (`spill`/`rescue`,
+      `_rescuers`), `max_inline_depth`, `Here::depth`, `GroupState::suspended/quiet/rescuers/rescue_busy`, the `own`
+      branch of `helpable`, `help_own`, `help_query`, and `help_until` (no consumer; tests that used it now poll or use
+      a child group). `stop_requested()` and `sleep_until` look up the innermost item of their own group on the stack.
+    - I1 help scope: the Q -> G -> H inversion at 1, 2 and 4 workers with a recorder (no foreign item inside a wait)
+      and a thread-local a query must not see (AR2). Mutant: a wait that serves a query again dies, by the I2 abort
+      (the query waits on G, which sits below it on the stack), and also in the random graphs.
+    - I2 no wait on the stack: death tests (forked child, SIGABRT and the site on stderr) for a self-wait,
+      `~WorkGroup` and `cancel_and_wait` from the group's own item, and G -> H -> G on one worker; a child wait is the
+      control. Mutants: top frame only dies (G -> H -> G hangs, SIGALRM); self check dropped dies (self-wait hangs).
+    - I3 helpers: former 6d and 6e (workers waiting on a width-capped group at 1, 2, 4 threads, widths 0 to 3; peak 1
+      under 4 helpers). Mutants F1 (old admission rule) hangs; F2 (no ticket yield) fails `peak == 1`; both also die in
+      the random graphs (F1: hang, F2: `peak_over`).
+    - I4 wake: three workers parked on a width-1 group whose width is held by a 50 ms item with three queued behind
+      it; all finish. Mutant: no wake at the end of a turn hangs. Honest gap: the half of the wake that fires when a
+      lane becomes helpable (not idle) has no liveness effect, since the thread ending the turn requeues and serves
+      the ticket itself, so its mutant (`I4b`) survives; it only lets a parked waiter share the work sooner.
+    - I5 resources: 20,000 items of G, each posting two items to a child group of its own and waiting, on 1 and 4
+      workers: process threads stay at the base plus the workers (sampled every 200 us; slack 2), deepest stack 2 items;
+      a chain of 500 groups on one worker (150 under ASan: a macOS worker has a 512 KB stack and ASan frames overflow it
+      at 500) completes. Mutant: a wait that starts a thread fails the thread bound.
+    - I6 property test: 50 groups, widths 0 to 3, three classes, items fan out to random lower groups and wait, an
+      outside producer, 1, 2 and 4 workers, width counted over whole items; 400 iterations in CTest, 2,000 twice in each
+      of TSan and ASan. Mutants I1, F1, F2 die in it.
+    - AL2 `WorkGroup::on_idle(WorkIdle&)` / `cancel_idle`: small (about 60 lines), so built here rather than moved to X2.
+      Tests: fires at once on an idle group, once on the idle-making thread otherwise, `cancel_idle` before and after,
+      2,000 nodes under load, and a thread standing for an event loop never reaches `block_guard`. Mutants: never
+      taken at the end of a turn, and not fired when already idle, both die.
+    - AR2: gone with help-anything; the thread-local observation is the I1 test.
+    - Probes on this head (`.scratch/l2b/`, built from the originals unchanged except as noted): `inversion` passes at 2,
+      4 (2 busy) and 8 (6 busy) workers, twice, plus TSan 2 and 4 and ASan 4 (1 worker is the probe's artefact: g spins
+      on h); `width_xwait` passes at threads 1, 2, 4 and widths 0 to 3, plain and ASan; `stress` chain (own-group wait
+      removed from the probe), lastitem pass at 1, 2, 4 workers plain, TSan and ASan; `stress deep`, `nested`, `siblings`,
+      `dtor`, `postwait` are own-group waits and abort with the message, as ruled; the child-group form `deepchild`
+      completes at N = 100,000 (max depth 2 on one worker, plain) and 20,000 (ASan); `rescue` is obsolete: its child-group
+      form (`rescue_child.cc`, with the same `pthread_create` interpose) completes with every post-start thread creation
+      failing (EAGAIN) and `creates=0` at W 1/4/16, G 1/16, N up to 20,000 (plain and TSan), so the EAGAIN deadlock has no
+      path to take; I5 replaces the thread-growth probe.
+    - Sanitizers on `threadpool:19a17d0`: TSan (`-O1`) all 7 CTest targets once, 4 repeats of the 4 work_ targets, and
+      `work_wait` with 2,000 graphs twice; ASan+UBSan the same with 3 repeats; all clean.
+    - `cpp-libraries/tools/preflight.sh`: mac-hardened ok, mac-asan-ubsan ok. Linux and FreeBSD VMs: see Next.
   - [ ] L2-10. CI green on the pushed branch: run 40981849396 (workflow_dispatch; the workflow has no push trigger for this prefix) was queued when I stopped, no job result yet. The lead watches.
-- Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs
-  commit after it (README untouched; API, ARCHITECTURE, AGENTS, `docs/mechanisms/work-pool.md`, this ledger and
-  the K data).
+- Done: `threadpool:6573176` merge aging, `block_guard`, the wait fix and `test/work_scheduling.cc`; the docs commit after it;
+  the review round (`threadpool:0244bd3`, B1, B3, B4); `threadpool:7a1a5c5` the ruled wait, `on_idle` and `test/work_wait.cc`;
+  `threadpool:19a17d0` the ASan chain length and ARCHITECTURE.
 - Doing: nothing.
 - Next:
-  1. The lead's re-check of B1 to B4 and N1, and CI. The new areas to look at: `serve()`'s ticket yield, `spill()` and
-     `rescue()`, `wait()`'s `done()` and the cross-group `suspended`.
-  2. K6 (FreeBSD kernel time, `bench/kernel_time.cc`) was not part of L2 and is still open from `scheduler.md`.
-  3. Xapiand sets `block_guard` to `engine::check_may_block` and posts chores with `merge_age` as D4 states.
+  1. The lead: CI on the pushed head; the Linux and FreeBSD preflight and the K1 to K3 rerun are queued behind strata L5's
+     final preflight (strict holds are exclusive on macOS), results in the Log when they land.
+  2. The re-check of B2 and N1 with `.scratch/arch/inversion.cc`, `.scratch/rc1/rescue.cc` (obsolete, see L2-12) and
+     `stress.cc deep` (a death test now; `.scratch/l2b/stress.cc deepchild` is its child-group form).
+  3. strata L5 must change (list for the lead; strata is not edited here): repin `threadpool` in `CMakeLists.txt:30` from
+     `0244bd3` to the L2 head; AC1 text in `include/strata/core/executor.hh` (already states that `wait()` and `cancel()` are
+     never called from the group's own work); audit that no strata test or chore calls `executor::group::wait()` or
+     `cancel()` from an item of the same group, or destroys a `work_group` from its own item (all abort now); no use of
+     `help_until` exists. Xapiand: D4 and V2's negative test become a worker waiting on a child group plus the I2 death test
+     (AC2); X2 wraps `on_idle` as an awaitable resuming through `asio_scheduler::post()` and sets `block_guard` to
+     `engine::check_may_block`; a host that waits often keeps `reserve >= 1`; contract in `docs/API.md` "Waiting".
+  4. K6 (FreeBSD kernel time) is still open from `scheduler.md`.
 - Blocked on: nothing.
 - Decisions to confirm (architect), each a reading of the task:
   1. `block_guard` is a function pointer in `Options`, called with a site name, so the library has no reactor
-     knowledge. It fires for any non-worker thread on entry, even when `wait()` would return at once, so a
-     violation is found deterministically; hosts that legitimately wait from outside (shutdown, tests) must have
-     the guard allow it.
+     knowledge. It fires for any non-worker thread on entry to `wait()` (`help_until` is gone), even when the wait would
+     return at once, so a violation is found deterministically; hosts that legitimately wait from outside (shutdown,
+     tests) must have the guard allow it.
   2. Aging is per entry and uses a stamp in the merge ring. A pool-level "no merge for T" rule was rejected: it
      promotes one entry per interval (mutant M4 shows the test catching it).
   3. Flushes do not age against queries (the research note's open item stays open; 7c posts few queries per
