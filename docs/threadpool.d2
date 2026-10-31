@@ -1,17 +1,17 @@
-# threadpool: producers enqueue; named workers pull from one blocking queue.
+# threadpool: producers enqueue; named workers pull from one queue.
 # Render: d2 --layout elk --sketch --theme 302 docs/threadpool.d2 docs/threadpool.svg
 direction: right
 
 callers: Callers {
   style.multiple: true
-  label: "enqueue · enqueue_bulk\nasync → std::future"
+  label: "enqueue · post · enqueue_bulk\nasync → std::future"
 }
 
 group: TaskGroup {
   label: "TaskGroup\nowner-scoped cancel + wait\nround-robin, capped"
 }
 
-queue: BlockingConcurrentQueue {
+queue: "PoolQueue\ntail lock · head lock" {
   shape: queue
 }
 

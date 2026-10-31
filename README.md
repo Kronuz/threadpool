@@ -19,8 +19,11 @@ caller-owned item allocates nothing, and idle workers sleep on a futex.
 
 ## ✨ Highlights
 
-- **Three ways to submit:** fire-and-forget `enqueue`, `enqueue_bulk`, and `async`,
-  which returns a `std::future`.
+- **Four ways to submit:** fire-and-forget `enqueue`, `post` (the same with
+  arguments), `enqueue_bulk`, and `async`, which returns a `std::future`.
+- **Cheap tasks.** A task of up to 48 bytes is queued with no allocation, a producer
+  and a worker never share a lock, and an enqueue signals only when a worker sleeps;
+  see Performance.
 - **Task groups** (`TaskGroup`): cancel what has not started, signal what is
   running through a stop token, and wait for just your own tasks, on a pool other
   owners share. Groups are served round-robin with a per-group concurrency cap.
@@ -114,14 +117,57 @@ index.wait();
 [`examples/demo.cc`](examples/demo.cc) runs a fuller tour: futures, load spread
 across workers, the counters, both shutdowns, and `TaskQueue`.
 
+## ⚡ Performance
+
+`ThreadPool::enqueue` of a trivial task (one increment), from P producer threads into W workers,
+in nanoseconds per task: wall clock from the first submit until the last task has run, best of 7 runs
+under `quiet strict` (`bench/enqueue_bench.cc`). `old` is the pool before its own queue, frozen in
+`test/threadpool_old.hh`; `naive` is a mutex + condition variable pool; `asio` is
+`asio::thread_pool`. The spread (max over min of the 7 runs of one binary) is 1.04 to 1.4, except
+where noted.
+
+Apple M4 Pro (arm64, macOS 27):
+
+| P x W | old | **new** | naive | asio |
+|---|---|---|---|---|
+| 1 x 1 | 65 | **19** | 32 | 49 |
+| 1 x 4 | 262 | **34** | 157 | 227 |
+| 1 x 8 | 2371 | **35** (spread 3.0) | 1643 | 1045 |
+| 4 x 1 | 75 | **11** | 56 | 79 |
+| 4 x 4 | 127 | **34** | 73 | 110 |
+| 4 x 8 | 129 | **32** | 135 | 177 |
+
+Intel i9-9980HK (x86_64, macOS 15):
+
+| P x W | old | **new** | naive | asio |
+|---|---|---|---|---|
+| 1 x 1 | 249 | **32** | 132 | 225 |
+| 1 x 4 | 1716 | **126** | 967 | 840 |
+| 1 x 8 | 6196 | **223** (spread 1.8) | 1690 | 2289 |
+| 4 x 1 | 269 | **40** | 148 | 244 |
+| 4 x 4 | 533 | **146** | 226 | 389 |
+| 4 x 8 | 843 | **221** | 525 | 708 |
+
+A task whose closure is 40 bytes (past `std::function`'s inline buffer in libc++) costs the same as a
+small one, and idle pools use the same CPU as before (0.04% of a core for 4 idle workers on the M4 Pro,
+0.1% on the i9). A future round trip (`async(f).get()`, a worker that sleeps as the caller wakes) takes
+the same time as before, 9 to 10 microseconds on both machines. One task submitted every microsecond
+starts after 3 microseconds on the M4 Pro and 5 on the i9, against 8 and 7 before.
+
+How: a producer and a worker never share a lock (the queue is a list of 64-slot chunks with a lock at
+each end), the producers' lock is a spin lock because it is held a few dozen nanoseconds, no counter is
+a read-modify-write that all workers share, a task of up to 48 bytes is stored in its queue slot, and
+an enqueue signals only when a worker sleeps. [ARCHITECTURE.md](ARCHITECTURE.md) has the details and
+what was tried and left out.
+
 ## 🎯 When to use it
 
 - ✅ A fixed pool of long-lived workers for request handling, indexing, or other
   background work, with futures or group-scoped cancellation.
 - ✅ `WorkPool`: one pool shared by many owners, with fairness between them, latency
   classes, and high rates of tiny items.
-- ❌ `ThreadPool` at very high task rates: its queue is a `std::deque` behind a mutex
-  and every enqueue signals a condition variable. Use `WorkPool` there.
+- ✅ `ThreadPool` for floods of tiny tasks: tens of nanoseconds per task, from one producer or
+  many, and the gap to a mutex queue grows with the number of workers.
 - ❌ Work-stealing of fine-grained fork-join work: neither pool steals.
 - ❌ Coroutine scheduling: see [task](https://github.com/Kronuz/task).
 

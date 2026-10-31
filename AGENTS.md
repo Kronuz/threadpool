@@ -9,23 +9,29 @@ easy to fall into.
 
 ```
 threadpool.hh                 The pool: ThreadPool, ThreadPoolThread, PackagedTask, TaskWrapper, TaskQueue. Header.
+pool_queue.h                  PoolQueue: the workers' queue (chunked list, tail and head locks, sleep/wake protocol). Header.
+small_task.h                  SmallTask: the move-only 48-byte-inline void() callable a std::function<void()> task is queued as. Header.
 task_group.hh                 TaskGroup: owner-scoped cancel/wait over a pool, round-robin across groups. Header.
 work_pool.hh                  WorkPool/WorkGroup/WorkItem: the many-owner scheduler (lanes, ready rings, DRR, classes, futex idle). Header.
 thread.hh                     Thread<Impl,policy> CRTP base, ThreadPolicyType enum, thread-name free function decls. Header.
 thread.cc                     The only .cc: run_thread/setup_thread/set_thread_name/get_thread_name/sched_getcpu.
-blocking_concurrent_queue.h   Mutex + condvar queue the pool waits on. Header.
-concurrent_queue.h            Mutex + std::deque queue (NOT lock-free). Header.
+blocking_concurrent_queue.h   Mutex + condvar queue (no longer the pool's; kept for consumers). Header.
+concurrent_queue.h            Mutex + std::deque queue, what TaskQueue uses (NOT lock-free). Header.
 likely.h                      likely/unlikely macros; self-contained (no config.h).
 threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (stands in for Xapiand's log.h/traceback.h).
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
 test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
+test/small_task.cc            SmallTask: empty states, inline vs boxed allocation, destruction exactly once, move-only and throwing-move callables.
+test/pool_diff.cc             The pool against the frozen test/threadpool_old.hh: random scripts, shutdown paths, async shapes, totals.
+test/pool_stress.cc           Stress and invariants for the queue and its wake protocol (TSan/ASan): counts, order, no lost wakeup, counted, destruction.
+test/threadpool_old.hh        The pool before PoolQueue and SmallTask, frozen in namespace threadpool_old. Never edit it.
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
 test/work_pool.cc             WorkPool tests: delivery, reposts, a child-group wait, draining, ping-pong, idle CPU.
 test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
 test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 child-group waits, the V5 guard.
 test/work_wait.cc             Waits: abort on a stack cycle, inversion, width, wake, resources, random acyclic graphs; on_idle.
 docs/mechanisms/work-pool.md  How WorkPool works, why, and what guards each invariant.
-bench/                        kernel_time.cc (THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
+bench/                        enqueue_bench.cc (trivial-task throughput against the old pool, a naive pool, asio; idle, latency, trickle modes), kernel_time.cc (both THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, quick start.
@@ -98,15 +104,36 @@ name is `threadpool`.
   as possible. The worker loop checks `_finished` (acquire) each iteration and
   `_ending` only when it dequeues nothing. Keep `end`/`finish`/the worker loop in
   sync, or shutdown either hangs or drops queued tasks.
-- **Counters are the only state queries.** `_enqueued`/`_running`/`_workers` are
-  atomics maintained around enqueue/dequeue/run. `size()` etc. read them with
-  relaxed loads. Keep every fetch_add paired with its fetch_sub on the matching
-  path (enqueue failure rolls back, dequeue decrements `_enqueued`, run brackets
-  `_running`), or the reported numbers drift.
-- **The blocking queue is mutex-backed, not lock-free.** `ConcurrentQueue` is a
-  `std::deque` under a `std::mutex`; `BlockingConcurrentQueue` adds a condvar.
-  The class names match moodycamel's lock-free API but the implementation does
-  not. Do not assume lock-free semantics anywhere.
+- **Counters are the only state queries, and a task is always counted.** `size()` is
+  the queue's truthy items pushed minus popped (each stored under its own lock, never
+  a shared RMW); `running_size()` sums one flag per worker. `PoolQueue::pop` sets the
+  worker's flag under the head lock *before* the task leaves `size()`, so an idle
+  check `size() == 0 && running_size() == 0` never fires with a task in flight. Keep
+  that order; `test/pool_stress.cc` (`test_counted`) pins it.
+- **The queue is FIFO and never fails.** One logical FIFO for every producer: a task
+  starts after the ones enqueued before it, and one worker runs a producer's tasks in
+  order. `enqueue` always returns `true`. Do not shard the tail or batch on the consumer
+  side: a task that waits for a later one would then wait on its own worker's buffer.
+- **The sleep protocol is a seq_cst pair.** A producer publishes (`_tail_pos`, seq_cst)
+  then reads `_idle` (seq_cst); a sleeper stores `_idle` (seq_cst) then reads
+  `_tail_pos` (seq_cst) before it waits. Weakening either side to acquire/release
+  loses wakeups. The workers' 100 ms timeout hides a lost wakeup as latency, so the
+  stress test builds with `THREADPOOL_QUEUE_STATS` and fails on a sleeper that times
+  out and finds a task. Do not add a spin before the sleep: it makes a future round trip
+  about 45% slower (the worker's core is not free for the waking caller).
+- **The tail lock is a spin lock, the head lock a `std::mutex`.** Producers hold the
+  tail for a few dozen nanoseconds and waiting on a `std::mutex` costs far more; many
+  consumers on a spin lock stampede it, so surplus ones must sleep. Keep allocation out
+  of what the tail lock guards but the one chunk per 64 pushes.
+- **`ConcurrentQueue`/`BlockingConcurrentQueue` are mutex-backed, not lock-free.**
+  `ConcurrentQueue` is a `std::deque` under a `std::mutex`; `BlockingConcurrentQueue`
+  adds a condvar. `TaskQueue` uses them; the pool does not. Do not assume lock-free
+  semantics anywhere.
+- **`SmallTask` is the queued form of `std::function<void()>`.** It must keep accepting
+  what `std::function<void()>` accepts, including an empty one and a null function
+  pointer (an empty task, which `end()`/`finish()` queue as a sentinel), and it only
+  needs a move. A callable it stores inline must have a `noexcept` move, or the queue's
+  relocation could throw.
 
 - **`WorkPool` is separate from `ThreadPool`.** It shares only `Thread` and the trace
   hooks. Its invariants: every ring entry is one listed ticket of one lane; a lane with
@@ -135,8 +162,10 @@ name is `threadpool`.
   recover Xapiand's behavior, map `THREADPOOL_THREAD_REGISTER` to
   `init_thread_info` and `L_EXC` to `log.h`'s macro.
 - **Always extend the tests.** `test/test.cc` covers the pool, `test/task_group.cc`
-  covers `TaskGroup`; they are the only executable checks.
-  Any behavioral change should grow a corresponding assertion there.
+  covers `TaskGroup`, `test/pool_diff.cc` compares the pool with its frozen
+  predecessor and `test/pool_stress.cc` stresses the queue under TSan/ASan. Any
+  behavioral change should grow a corresponding assertion there. TSan on the Linux VM
+  needs clang and `setarch x86_64 -R`.
 
 ## Traps
 
@@ -177,7 +206,8 @@ decoupling:
   directly; `config.h` is now CMake-generated and carries only the pthread
   thread-naming feature macros that `thread.cc` needs.
 
-The pool logic is otherwise unchanged. Keep extraction hygiene separate from
-behavior changes so they can be reconciled with upstream. To restore Xapiand's
+Since the extraction the pool has its own queue (`PoolQueue`) and queued task type
+(`SmallTask`), with the same API and behavior (`CHANGELOG.md`). Keep extraction
+hygiene separate from behavior changes so they can be reconciled with upstream. To restore Xapiand's
 tracing/registration without editing these files, see "Tracing and thread
 registration" in [docs/API.md](docs/API.md).

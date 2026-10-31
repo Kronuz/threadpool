@@ -14,43 +14,73 @@ two-phase shutdown.
 
 It is built in three layers:
 
-1. A mutex-backed queue — `ConcurrentQueue` (a `std::deque` under a mutex) and
-   `BlockingConcurrentQueue` (which adds a condition variable so consumers wait
-   for work).
+1. The workers' queue — `PoolQueue` (`pool_queue.h`), an unbounded FIFO of
+   chunked slots with one lock for producers and one for consumers, and the
+   sleep and wake protocol that parks idle workers.
 2. A thread primitive — `Thread<Impl, policy>`, a CRTP base that runs a derived
    class's `operator()` on a detached `std::thread` and exposes a joinable
    future.
 3. The pool — `ThreadPool<TaskType, policy>`, which owns a vector of
    `ThreadPoolThread` workers (each a `Thread`) and one shared queue, plus the
-   task abstractions (`TaskWrapper`, `PackagedTask`) that make heterogeneous
-   callables uniform.
+   task abstractions (`TaskWrapper`, `SmallTask`, `PackagedTask`) that make
+   heterogeneous callables uniform.
 
-`TaskQueue` is a separate, smaller utility built on `ConcurrentQueue`: a one-shot
-queue of `std::packaged_task`s you drain by calling them. It does not use the
-pool.
+`TaskQueue` is a separate, smaller utility built on `ConcurrentQueue` (a
+`std::deque` under a mutex, with `BlockingConcurrentQueue` adding a condition
+variable): a one-shot queue of `std::packaged_task`s you drain by calling them.
+It does not use the pool, and the pool does not use those two queues.
 
-## The queue: `ConcurrentQueue` and `BlockingConcurrentQueue`
+## The queue: `PoolQueue`
 
-`ConcurrentQueue<T>` (`concurrent_queue.h`) is a `std::deque<T>` guarded by a
-`std::unique_ptr<std::mutex>` (a `unique_ptr` so the queue is movable). Every
-operation — `enqueue`, `enqueue_bulk`, `try_dequeue`, `size`, `empty` — takes the
-lock for its duration. `try_dequeue_bulk` is the one exception: it reads
-`queue.empty()` and pops without taking the lock, which is only safe because the
-sole caller (`TaskQueue::clear`) is single-threaded against its own queue.
+`PoolQueue<T>` (`pool_queue.h`) is what the workers take from. It holds `T` by
+value in chunks of 64 slots linked into a list: an unbounded FIFO, so an enqueue
+never fails or blocks.
 
-`BlockingConcurrentQueue<T>` (`blocking_concurrent_queue.h`) derives from it and
-adds a `std::condition_variable cond`. `enqueue` notifies one waiter,
-`enqueue_bulk` notifies all. `wait_dequeue` blocks until the predicate
-(`!queue.empty()`) holds; `wait_dequeue_timed(item, timeout_usecs)` is the one
-the pool actually uses — with a positive timeout it `wait_until`s a deadline and
-returns `false` on timeout, with `0` it polls once, with a negative value it
-loops on a 1-second `wait_for`. This is what lets a worker block for up to 100 ms
-waiting for a task instead of spinning.
+**Two locks, one per side.** `push()` takes the tail lock, constructs the item in
+the next slot, and publishes it by storing the new position (`_tail_pos`, seq_cst).
+`pop()` takes the head lock and moves the oldest item out. A consumer learns that an
+item exists by reading the published position, so producers and consumers meet only
+on the slot a task moves through. The producer links the next chunk before it
+publishes the last slot of the current one, so a consumer that finishes a chunk
+always finds its successor and frees the chunk it left; a chunk is allocated once
+per 64 tasks.
 
-Despite the names, neither is lock-free. They deliberately match the API of the
-lock-free [moodycamel](https://github.com/cameron314/concurrentqueue) queues so
-those could be swapped in, but this implementation is a plain mutex-backed deque.
-For the pool's task rates the mutex is not the bottleneck.
+**The locks fit their hold times.** The tail lock is held for a few dozen
+nanoseconds (a 56-byte move and two stores), so it is a test-and-test-and-set
+spin lock that yields after 64 spins: a producer that waits on a `std::mutex` sleeps
+in the kernel, which costs far more than the wait. The head lock is a `std::mutex`:
+with many workers, the surplus ones sleep instead of crowding the lock line.
+
+**Consumers cache the tail.** Under the head lock a consumer keeps the last tail
+position it read. While the queue has a backlog, the cache says an item exists and
+the line the producers write is not read at all; only an apparently empty queue
+re-reads it. With a flood of tasks that removes one cache miss per task.
+
+**Sleeping and waking.** A consumer that finds the queue empty registers under the
+sleep mutex (`_waiting`), publishes the count of sleepers nobody has signaled
+(`_idle`, seq_cst), looks at the queue once more, and only then waits on the
+condition variable. A producer, after its seq_cst publish, reads `_idle` and takes
+the sleep mutex only when it is non-zero. The two seq_cst pairs are in one total
+order, so either the producer sees the sleeper or the sleeper sees the item: no
+wakeup is lost. A wakeup is a token (`_signaled`): the producer adds it before
+notifying and the woken worker takes it. A burst of enqueues hands out at most one
+token per sleeper, so it wakes at most that many workers and the rest of the burst
+signals nothing. When the workers are busy (a flood), `_idle` is zero and an enqueue
+signals nothing at all.
+
+**Counters without a shared RMW.** `size()` is the truthy items pushed (stored under
+the tail lock) minus the ones popped (stored under the head lock); a sentinel
+(`end()`'s and `finish()`'s empty task) counts in neither. `pop()` takes a `claim`
+flag, the worker's own line in the pool: the head lock sets it before the popped count
+is released, so a task is always counted in `size()` or in `running_size()`.
+
+Consumers do not spin before they sleep. A future round trip (`async(f).get()`)
+sleeps the worker as it wakes the caller; a worker that spins instead keeps its core
+from the caller, and the round trip was 45% slower on an M1 Pro.
+
+`ConcurrentQueue` and `BlockingConcurrentQueue` (`concurrent_queue.h`,
+`blocking_concurrent_queue.h`) remain, with their API, for `TaskQueue` and for
+consumers that include them. Despite the names neither is lock-free.
 
 ## The thread primitive: `Thread<ThreadImpl, policy>`
 
@@ -90,12 +120,15 @@ injectable hook where a crash handler registers the thread (Xapiand's
 `ThreadPool<TaskType, thread_policy>` (`threadpool.hh`) owns:
 
 - `std::vector<ThreadPoolThread<TaskType, policy>> _threads` — the workers.
-- `BlockingConcurrentQueue<TaskWrapper<TaskType>> _queue` — the shared work
-  queue.
+- `PoolQueue<TaskWrapper<TaskType>> _queue` — the shared work queue.
+- `std::unique_ptr<Running[]> _running` — one flag per worker, each on a cache line
+  of its own: set while the worker runs a task. `running_size()` sums them.
 - `const char* _format` — the `std::format` string used to name workers.
-- five atomics: `_ending`, `_finished`, `_enqueued`, `_running`, `_workers`.
+- three atomics: `_ending`, `_finished`, `_workers`. `size()` is the queue's own
+  count.
 
-The constructor takes `(format, num_threads, queue_size = 1000)`. It sizes the
+The constructor takes `(format, num_threads, queue_size = 1000)`; the queue is
+unbounded and `queue_size` is ignored, as it always was. It sizes the
 worker vector, then constructs and `run()`s each `ThreadPoolThread`. Each worker
 is named at construction by rendering `_format` with its index via
 `std::vformat(_format, std::make_format_args(idx))` (e.g. `"CH{:02}"` -> `"CH00"`,
@@ -106,11 +139,13 @@ runtime `const char*`, not a compile-time format string.
 
 `ThreadPoolThread::operator()` (`threadpool.hh`) is the body each worker runs. It
 bumps `_workers`, then loops while `_finished` is not set (acquire load). Each
-iteration it `wait_dequeue_timed(task, 100000)` — blocks up to 100 ms for a task.
-On a valid, non-empty task it brackets the run: `_running++`, `_enqueued--`, run
-the task in a try/catch (a thrown exception is logged via `L_EXC` and swallowed,
-so one bad task never kills the worker), `_running--`. If the dequeue produced
-nothing and `_ending` is set, it breaks. On exit it decrements `_workers`.
+iteration it `pop(task, 100ms)` — blocks up to 100 ms for a task. On a valid,
+non-empty task it runs it in a try/catch (a thrown exception is logged via
+`L_EXC` and swallowed, so one bad task never kills the worker) and clears its
+running flag; the queue set that flag under the head lock as the task left
+`size()`. If the dequeue produced nothing and `_ending` is set, it breaks. On exit
+it decrements `_workers`. The 100 ms wait is a deadline read once, when the worker
+goes to sleep, not on every dequeue.
 
 The two-phase nature lives here. A `nullptr` task (enqueued by `end()`/`finish()`)
 dequeues as an empty `TaskWrapper`, so `valid && task` is false; that is the
@@ -119,21 +154,28 @@ which the loop condition reads, so workers stop even mid-queue.
 
 ### Submitting work
 
-- `enqueue(func)` — `_enqueued++`, push; on a failed push, roll back `_enqueued`
-  and return `false`.
-- `enqueue_bulk(first, count)` — the same, by `count`.
+- `enqueue(func)` — builds the `TaskWrapper` and pushes it; always `true`. A task
+  whose callable fits `SmallTask::inline_size` (48 bytes) is stored in the queue
+  slot with no allocation.
+- `enqueue_bulk(first, count)` — pushes `count` items under one tail-lock hold and
+  wakes up to `count` sleepers.
+- `post(func, args...)` — queues `func(args...)` with no future: the bound call is
+  one closure, where `async` also allocates the future's shared state.
 - `package(func, args...)` — builds a `PackagedTask` whose stored closure
   `std::apply`s `func` over a captured tuple of `args`. Returns it without
   enqueuing.
-- `async(func, args...)` — `package`s the call, grabs the future, enqueues a
-  closure that runs the packaged task, and returns the future. If it can't
-  enqueue, it throws `std::runtime_error`.
+- `async(func, args...)` — makes a `std::promise`, takes its future, and queues a
+  closure that holds the promise and the call: the promise's shared state is the
+  one allocation a small call needs (a `packaged_task` costs a second one for its own
+  copy of the call). The closure runs the call and sets the value, or the exception
+  it threw. A task dropped before it runs (`clear()`, a destroyed pool) breaks the
+  promise, as a destroyed `packaged_task` does.
 
 ### Shutdown and joining
 
 `end()` (drain-then-exit) and `finish()` (exit-asap) each `exchange` their flag
-(so they fire once) and enqueue one `nullptr` per thread to wake every blocked
-worker. `join(timeout = 60s)` divides the timeout across the running workers
+(so they fire once) and queue one empty task per thread: each wakes a sleeping
+worker, and under `end()` each is the last thing a worker takes. `join(timeout = 60s)` divides the timeout across the running workers
 (`timeout / _workers`, min 1) and joins each in turn, returning `false` if any
 times out. The destructor calls `finish()` then `join()` inside a try/catch whose
 catch logs through `L_EXC`.
@@ -145,7 +187,14 @@ catch logs through `L_EXC`.
 `TaskType` is what the queue stores. `TaskWrapper` specializes on three shapes so
 the worker can invoke any of them uniformly (`threadpool.hh`):
 
-- `TaskWrapper<std::function<void()>>` — calls `t()` directly.
+- `TaskWrapper<std::function<void()>>` — calls `t()` directly. `t` is a
+  `threadpool_detail::SmallTask` (`small_task.h`), not a `std::function`: a move-only
+  `void()` callable with 48 bytes of inline storage. It accepts what `std::function`
+  accepts (an empty one or a null function pointer makes an empty task) and callables
+  that only move. A closure that fits and has a `noexcept` move is moved into place; a
+  trivially copyable one is relocated with a `memcpy` of the buffer; a larger one is
+  boxed with one allocation. `std::function`'s own buffer is 16 bytes in libstdc++ and
+  24 in libc++, so the same closure that allocated there is stored inline now.
 - `TaskWrapper<std::shared_ptr<P>>` and `TaskWrapper<std::unique_ptr<P>>` — call
   `t->operator()()` but only if the pointer is non-null.
 
@@ -287,18 +336,19 @@ futex wait on the group's word, which `cancel()` bumps.
 
 ## Concurrency model
 
-The pool is many-producer, many-consumer, with all sharing mediated by the
-queue's mutex and a handful of atomics:
+The pool is many-producer, many-consumer, with the sharing mediated by the queue's
+two locks and its sleep protocol (see "The queue"):
 
-- **Producers** (`enqueue`/`enqueue_bulk`/`async`) take the queue mutex to push
-  and update `_enqueued` atomically. Any number can run concurrently.
-- **Consumers** (the worker threads) take the queue mutex to pop and update
-  `_running`/`_enqueued`/`_workers` atomically. The queue's condition variable
-  parks idle workers so they don't spin.
+- **Producers** (`enqueue`/`enqueue_bulk`/`post`/`async`) take the tail lock to push
+  and then, only when a worker sleeps, the sleep mutex to wake one. Any number can run
+  concurrently, and they never touch a counter every worker shares.
+- **Consumers** (the worker threads) take the head lock to pop. A worker that finds
+  nothing sleeps on the queue's condition variable, so idle workers use no CPU beyond
+  the 100 ms timeout wake.
 - **State queries** (`size`, `running_size`, `threadpool_workers`, `finished`)
-  read the atomics with relaxed loads and never lock.
+  read atomics with relaxed or acquire loads and never lock.
 - **Shutdown** is coordinated by `_ending`/`_finished` (each set once via
-  `exchange`) plus the `nullptr` wakeups, and `join()` through the per-thread
+  `exchange`) plus the empty-task wakeups, and `join()` through the per-thread
   promise/future.
 
 A task's own exception is contained: the worker's try/catch swallows it (logging
@@ -358,13 +408,20 @@ headers depend on no generated config — only `thread.cc` does.
 
 ## Design decisions and trade-offs
 
-- **Mutex queue over lock-free.** A `std::deque` under a mutex is simple and
-  obviously correct, and the condition variable gives cheap blocking. The cost is
-  contention under very high task rates; the names mirror moodycamel's so a
-  lock-free queue can be dropped in if that ever bites.
+- **Two locks over lock-free.** One lock per side of a chunked list gives exact FIFO
+  order, an unbounded queue, immediate reclamation of drained chunks, and no
+  memory-reclamation scheme; a task never sits invisible behind a preempted producer,
+  as it can in a ticketed ring. The cost is that producers serialize among themselves
+  and so do consumers, which is cheap while each critical section is a few dozen
+  nanoseconds.
+- **No batching on the consumer side.** A worker takes one task at a time, as before.
+  Taking several into a local buffer would cut lock traffic, but a task that waits for
+  a later task (a future it blocks on) could then wait on its own worker's buffer: a
+  deadlock the shared FIFO cannot have.
 - **Workers poll with a 100 ms timeout** rather than blocking forever, so a
-  worker periodically re-checks `_finished`/`_ending` even if no `nullptr` wakeup
-  reaches it. The price is a small wakeup latency bound on shutdown.
+  worker periodically re-checks `_finished`/`_ending` even if no empty-task wakeup
+  reaches it (`clear()` can consume them). The price is a small wakeup latency bound
+  on shutdown and about 0.1% of a core for an idle pool.
 - **Pointer task types.** Allowing `TaskType` to be a `shared_ptr`/`unique_ptr`
   callable (not just `std::function`) lets tasks carry state and be polymorphic
   without `std::function`'s allocation and type erasure on the hot path.
@@ -375,8 +432,9 @@ headers depend on no generated config — only `thread.cc` does.
 
 ## Known limitations and sharp edges
 
-- **The queue is not lock-free** despite the class names. Don't rely on lock-free
-  progress guarantees.
+- **The queue is not lock-free.** A producer preempted inside the tail lock holds up
+  the other producers (they yield) until it runs again; the head lock does the same to
+  consumers.
 - **`ThreadPolicyType` does nothing at runtime.** It is purely a
   source-compatibility / future-extension tag. Wiring it up is a real behavior
   change.
@@ -386,9 +444,9 @@ headers depend on no generated config — only `thread.cc` does.
 - **`sched_getcpu` is provided only under `__APPLE__`** (Linux glibc already has
   it). On Apple Silicon it returns `-1`; callers must treat negative as
   "unknown".
-- **Per-task allocation.** `async`/`package` allocate a `PackagedTask` closure
-  and the queue stores type-erased wrappers; a very hot submission path pays for
-  that.
+- **Per-task allocation.** `enqueue` and `post` of a closure up to 48 bytes allocate
+  nothing; a larger one costs one allocation. `async` costs the future's shared state,
+  and `package` the packaged task's state and its copy of the call.
 
 ## Standalone vs. Xapiand
 

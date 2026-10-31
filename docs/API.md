@@ -5,10 +5,19 @@
 - `ThreadPool(const char* format, size_t num_threads, size_t queue_size = 1000)`
   — starts `num_threads` workers immediately; `format` is a `std::format` string
   rendered with the worker index to name each thread (e.g. `"CH{:02}"`).
-- `enqueue(Func&&)` / `enqueue_bulk(It first, size_t count)` — push work; return
-  `false` if the queue rejects it.
-- `async(Func&&, Args&&...) -> std::future<R>` — package a call and get its
-  future; throws `std::runtime_error` if it can't enqueue.
+- `enqueue(Func&&)` / `enqueue_bulk(It first, size_t count)` — push work; the queue
+  is unbounded, so both return `true`. A callable of up to 48 bytes is stored in the
+  queue slot with no allocation; a larger one costs one. It need not be copyable.
+  `enqueue_bulk` pushes under one lock and wakes up to `count` sleeping workers.
+- `post(Func&&, Args&&...)` — queue `func(args...)` with no future (the arguments are
+  copied or moved in, as for `async`); returns `true`. What a worker throws is logged
+  through `L_EXC`. Use it where `async`'s future would be discarded: it skips the
+  future's shared state.
+- `async(Func&&, Args&&...) -> std::future<R>` — queue a call and get its
+  future; the future's shared state is the only allocation a small call needs. It
+  carries the value, or the exception the call threw; a task dropped before it runs
+  (`clear()`, a destroyed pool) leaves `std::future_errc::broken_promise`. Throws
+  `std::runtime_error` if it can't enqueue.
 - `package(Func&&, Args&&...) -> PackagedTask<...>` — build the packaged task
   without enqueuing (the building block `async` uses).
 - `end()` — stop once the queue drains. `finish()` — stop as soon as possible.
