@@ -117,7 +117,11 @@ class PoolQueue {
 	std::atomic<std::size_t> _tasks_pushed{0};  // truthy items pushed; stored under _tl
 
 	// The position of the next item to publish, written under _tl, read by consumers.
+#ifdef POOLQ_MERGE_TAIL
+	std::atomic<std::size_t> _tail_pos{0};
+#else
 	alignas(line) std::atomic<std::size_t> _tail_pos{0};
+#endif
 
 	// Consumers: the head lock and what it guards.
 	alignas(line) std::mutex _hl;
