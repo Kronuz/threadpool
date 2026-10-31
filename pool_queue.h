@@ -29,9 +29,14 @@
 #include <memory>                // for std::unique_ptr, std::launder
 #include <mutex>                 // for std::mutex
 #include <new>                   // for placement new
+#include <thread>                // for std::this_thread::yield
 #include <type_traits>           // for std::is_nothrow_move_constructible_v
 #include <utility>               // for std::forward, std::move
 
+
+#ifndef POOLQ_SPIN_ITERS
+#  define POOLQ_SPIN_ITERS 64
+#endif
 
 namespace threadpool_detail {
 
@@ -44,6 +49,39 @@ inline void pool_relax() noexcept {
 	std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
 }
+
+// Test-and-test-and-set with a yield after a short spin: for locks held a few dozen nanoseconds.
+class PoolSpinMutex {
+	std::atomic<unsigned> _locked{0};
+
+public:
+	void lock() noexcept {
+		if (!_locked.exchange(1, std::memory_order_acquire)) {
+			return;
+		}
+		for (unsigned spins = 0;; ++spins) {
+			while (_locked.load(std::memory_order_relaxed)) {
+				if (spins < POOLQ_SPIN_ITERS) {
+					pool_relax();
+				} else {
+					std::this_thread::yield();
+				}
+				++spins;
+			}
+			if (!_locked.exchange(1, std::memory_order_acquire)) {
+				return;
+			}
+		}
+	}
+
+	bool try_lock() noexcept {
+		return !_locked.load(std::memory_order_relaxed) && !_locked.exchange(1, std::memory_order_acquire);
+	}
+
+	void unlock() noexcept {
+		_locked.store(0, std::memory_order_release);
+	}
+};
 
 // The queue ThreadPool's workers take from: an unbounded FIFO with many producers and many
 // consumers, holding T by value in chunks of ChunkSlots slots. T must be nothrow move constructible
@@ -71,8 +109,14 @@ class PoolQueue {
 		T* item(std::size_t i) noexcept { return std::launder(static_cast<T*>(at(i))); }
 	};
 
+#ifdef POOLQ_SPINLOCK
+	using EndLock = PoolSpinMutex;
+#else
+	using EndLock = std::mutex;
+#endif
+
 	// Producers: the tail lock and what it guards.
-	alignas(line) std::mutex _tl;
+	alignas(line) EndLock _tl;
 	Chunk* _tail;
 	std::size_t _tail_idx = 0;
 	std::atomic<std::size_t> _tasks_pushed{0};  // truthy items pushed; stored under _tl
@@ -81,7 +125,7 @@ class PoolQueue {
 	alignas(line) std::atomic<std::size_t> _tail_pos{0};
 
 	// Consumers: the head lock and what it guards.
-	alignas(line) std::mutex _hl;
+	alignas(line) EndLock _hl;
 	Chunk* _head;
 	std::size_t _head_idx = 0;
 	std::atomic<std::size_t> _head_pos{0};      // items taken; stored under _hl
@@ -175,7 +219,7 @@ public:
 	void push(T&& item) {
 		const bool counted = static_cast<bool>(item);
 		{
-			std::lock_guard<std::mutex> lk(_tl);
+			std::lock_guard<EndLock> lk(_tl);
 			push_locked(std::move(item), counted, std::memory_order_seq_cst);
 		}
 		wake(1);
@@ -189,7 +233,7 @@ public:
 			return;
 		}
 		{
-			std::lock_guard<std::mutex> lk(_tl);
+			std::lock_guard<EndLock> lk(_tl);
 			for (std::size_t i = 0; i < count; ++i) {
 				T item(std::move(*first++));
 				const bool counted = static_cast<bool>(item);
@@ -206,7 +250,7 @@ public:
 		if (_head_pos.load(std::memory_order_relaxed) == _tail_pos.load(std::memory_order_acquire)) {
 			return false;
 		}
-		std::lock_guard<std::mutex> lk(_hl);
+		std::lock_guard<EndLock> lk(_hl);
 		const auto pos = _head_pos.load(std::memory_order_relaxed);
 		if (pos == _tail_pos.load(std::memory_order_acquire)) {
 			return false;
