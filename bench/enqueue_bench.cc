@@ -1,7 +1,11 @@
 // Trivial-task throughput of ThreadPool::enqueue against the frozen pre-change pool, a mutex +
 // condition variable pool, and asio::thread_pool (when asio is found).
 //
-//   enqueue_bench [reps] [tasks-per-producer]
+//   enqueue_bench [reps] [tasks-per-producer] [shared|local|cap40|idle|latency]
+//
+// idle: the CPU an idle pool uses (its workers' wakeups), as a share of one core.
+// latency: ns for one future round trip, async(f).get() back to back, which includes waking a
+// worker that may have gone to sleep.
 //
 // Every pool runs the same stateless task from P producer threads into W workers. The figure is
 // wall-clock ns per task, from the first submit until the last task has run (min and median over
@@ -26,9 +30,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/resource.h>
 
 #include "threadpool.hh"
 #include "threadpool_old.hh"
@@ -284,12 +291,91 @@ void bench(int W, int P, long N, int reps) {
 	new_pool.join();
 }
 
+double cpu_seconds() {
+	rusage ru;
+	getrusage(RUSAGE_SELF, &ru);
+	return static_cast<double>(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) + 1e-6 * static_cast<double>(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec);
+}
+
+template <typename Pool>
+void idle_cpu(const char* name, int W) {
+	Pool pool("I{:02}", static_cast<std::size_t>(W));
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	const double c0 = cpu_seconds();
+	const double t0 = now_s();
+	std::this_thread::sleep_for(std::chrono::seconds(4));
+	std::printf("  %-20s %d idle workers: %.3f%% of one core\n", name, W, 100 * (cpu_seconds() - c0) / (now_s() - t0));
+}
+
+// ns per async(f).get(); the median of reps batches.
+template <typename Submit>
+void latency(const char* name, int reps, Submit&& round_trip) {
+	std::vector<double> batches;
+	for (int r = 0; r < reps; r++) {
+		const int n = 2000;
+		const double t0 = now_s();
+		for (int i = 0; i < n; i++) {
+			round_trip();
+		}
+		batches.push_back((now_s() - t0) * 1e9 / n);
+	}
+	std::sort(batches.begin(), batches.end());
+	std::printf("  %-20s %8.0f ns (min %.0f, spread %.2f)\n", name, batches[batches.size() / 2], batches.front(), batches.back() / batches.front());
+}
+
+void run_idle_and_latency(const std::string& only, int reps) {
+	const int W = 4;
+	if (only == "idle") {
+		std::printf("--- idle pools (4 s each)\n");
+		for (int w : {4, 8}) {
+			idle_cpu<threadpool_old::ThreadPool<>>("old ThreadPool", w);
+			idle_cpu<ThreadPool<>>("new ThreadPool", w);
+		}
+	} else {
+		std::printf("--- future round trip, %d workers\n", W);
+		threadpool_old::ThreadPool<> old_pool("L{:02}", W);
+		ThreadPool<> new_pool("L{:02}", W);
+		NaivePool naive(W);
+#ifdef HAVE_ASIO
+		asio::thread_pool asio_pool(W);
+#endif
+		for (int r = 0; r < 2; r++) {  // twice: the order is a neighbor effect, not a result
+			latency("old async", reps, [&] { return old_pool.async([] { return 1; }).get(); });
+			latency("new async", reps, [&] { return new_pool.async([] { return 1; }).get(); });
+			latency("new post+promise", reps, [&] {
+				auto p = std::make_shared<std::promise<int>>();
+				auto f = p->get_future();
+				new_pool.post([p] { p->set_value(1); });
+				return f.get();
+			});
+			latency("naive+promise", reps, [&] {
+				auto p = std::make_shared<std::promise<int>>();
+				auto f = p->get_future();
+				naive.enqueue([p] { p->set_value(1); });
+				return f.get();
+			});
+#ifdef HAVE_ASIO
+			latency("asio post+promise", reps, [&] {
+				auto p = std::make_shared<std::promise<int>>();
+				auto f = p->get_future();
+				asio::post(asio_pool, [p] { p->set_value(1); });
+				return f.get();
+			});
+#endif
+		}
+	}
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	const int reps = argc > 1 ? std::atoi(argv[1]) : 7;
 	const long N = argc > 2 ? std::atol(argv[2]) : 100000;
 	const char* only = argc > 3 ? argv[3] : "";
+	if (std::string(only) == "idle" || std::string(only) == "latency") {
+		run_idle_and_latency(only, reps);
+		return 0;
+	}
 	for (int W : {1, 4, 8}) {
 		for (int P : {1, 4}) {
 			if (std::string(only).empty() || std::string(only) == "shared") {
