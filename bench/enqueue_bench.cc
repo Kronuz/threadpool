@@ -1,8 +1,10 @@
 // Trivial-task throughput of ThreadPool::enqueue against the frozen pre-change pool, a mutex +
 // condition variable pool, and asio::thread_pool (when asio is found).
 //
-//   enqueue_bench [reps] [tasks-per-producer] [shared|local|cap40|idle|latency]
+//   enqueue_bench [reps] [tasks-per-producer] [shared|local|cap40|idle|latency|trickle]
 //
+// trickle: one producer submits a task every gap_us microseconds; reports the delay from submit
+// to the start of the task (median, p99) and the CPU the whole process used per task.
 // idle: the CPU an idle pool uses (its workers' wakeups), as a share of one core.
 // latency: ns for one future round trip, async(f).get() back to back, which includes waking a
 // worker that may have gone to sleep.
@@ -323,6 +325,58 @@ void latency(const char* name, int reps, Submit&& round_trip) {
 	std::printf("  %-20s %8.0f ns (min %.0f, spread %.2f)\n", name, batches[batches.size() / 2], batches.front(), batches.back() / batches.front());
 }
 
+// Submits n tasks, one per gap_ns (the producer waits by spinning on the clock), and returns the
+// submit-to-start delay of each, in ns, with the CPU seconds the process used.
+template <typename Submit>
+void trickle(const char* name, long n, double gap_ns, Submit&& submit) {
+	std::vector<double> starts(static_cast<std::size_t>(n), 0.0);
+	std::atomic<long> done{0};
+	std::vector<double> submitted(static_cast<std::size_t>(n), 0.0);
+	const double c0 = cpu_seconds();
+	const double t0 = now_s();
+	for (long i = 0; i < n; i++) {
+		const double due = t0 + static_cast<double>(i) * gap_ns * 1e-9;
+		while (now_s() < due) {
+		}
+		submitted[static_cast<std::size_t>(i)] = now_s();
+		submit([&starts, &done, i] {
+			starts[static_cast<std::size_t>(i)] = now_s();
+			done.fetch_add(1, std::memory_order_release);
+		});
+	}
+	while (done.load(std::memory_order_acquire) < n) {
+		std::this_thread::sleep_for(std::chrono::microseconds(50));
+	}
+	const double cpu = cpu_seconds() - c0;
+	std::vector<double> delay(static_cast<std::size_t>(n));
+	for (long i = 0; i < n; i++) {
+		delay[static_cast<std::size_t>(i)] = (starts[static_cast<std::size_t>(i)] - submitted[static_cast<std::size_t>(i)]) * 1e9;
+	}
+	std::sort(delay.begin(), delay.end());
+	// The producer's own spin-wait is one core for the whole run; the rest is the pool's.
+	const double wall = now_s() - t0;
+	std::printf("  %-20s delay median %7.0f ns  p99 %8.0f ns   pool CPU %6.0f ns per task\n", name, delay[delay.size() / 2], delay[delay.size() * 99 / 100], (cpu - wall) * 1e9 / static_cast<double>(n));
+}
+
+void run_trickle(double gap_ns, long n) {
+	const int W = 4;
+	std::printf("--- trickle: one producer, a task every %.0f ns, %d workers\n", gap_ns, W);
+	threadpool_old::ThreadPool<> old_pool("T{:02}", W);
+	ThreadPool<> new_pool("T{:02}", W);
+	NaivePool naive(W);
+#ifdef HAVE_ASIO
+	asio::thread_pool asio_pool(W);
+#endif
+	for (int r = 0; r < 2; r++) {
+		trickle("old ThreadPool", n, gap_ns, [&](auto&& t) { old_pool.enqueue(std::forward<decltype(t)>(t)); });
+		trickle("new ThreadPool", n, gap_ns, [&](auto&& t) { new_pool.enqueue(std::forward<decltype(t)>(t)); });
+		trickle("mutex+cv naive", n, gap_ns, [&](auto&& t) { naive.enqueue(std::forward<decltype(t)>(t)); });
+#ifdef HAVE_ASIO
+		trickle("asio::thread_pool", n, gap_ns, [&](auto&& t) { asio::post(asio_pool, std::forward<decltype(t)>(t)); });
+#endif
+	}
+}
+
 void run_idle_and_latency(const std::string& only, int reps) {
 	const int W = 4;
 	if (only == "idle") {
@@ -372,6 +426,12 @@ int main(int argc, char** argv) {
 	const int reps = argc > 1 ? std::atoi(argv[1]) : 7;
 	const long N = argc > 2 ? std::atol(argv[2]) : 100000;
 	const char* only = argc > 3 ? argv[3] : "";
+	if (std::string(only) == "trickle") {
+		for (double gap : {1000.0, 5000.0, 50000.0}) {
+			run_trickle(gap, N);
+		}
+		return 0;
+	}
 	if (std::string(only) == "idle" || std::string(only) == "latency") {
 		run_idle_and_latency(only, reps);
 		return 0;
