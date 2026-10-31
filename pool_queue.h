@@ -34,10 +34,6 @@
 #include <utility>               // for std::forward, std::move
 
 
-#ifndef POOLQ_SPIN_ITERS
-#  define POOLQ_SPIN_ITERS 64
-#endif
-
 namespace threadpool_detail {
 
 inline void pool_relax() noexcept {
@@ -50,7 +46,9 @@ inline void pool_relax() noexcept {
 #endif
 }
 
-// Test-and-test-and-set with a yield after a short spin: for locks held a few dozen nanoseconds.
+// Test-and-test-and-set that yields after a short spin: for a lock held a few dozen nanoseconds,
+// where a waiter that sleeps in the kernel costs far more than the wait. A holder that is
+// preempted makes waiters yield, not burn their slices.
 class PoolSpinMutex {
 	std::atomic<unsigned> _locked{0};
 
@@ -59,14 +57,14 @@ public:
 		if (!_locked.exchange(1, std::memory_order_acquire)) {
 			return;
 		}
-		for (unsigned spins = 0;; ++spins) {
+		unsigned spins = 0;
+		for (;;) {
 			while (_locked.load(std::memory_order_relaxed)) {
-				if (spins < POOLQ_SPIN_ITERS) {
+				if (++spins < 64) {
 					pool_relax();
 				} else {
 					std::this_thread::yield();
 				}
-				++spins;
 			}
 			if (!_locked.exchange(1, std::memory_order_acquire)) {
 				return;
@@ -91,7 +89,10 @@ public:
 // and a consumer finds work by reading the published position, so the two sides meet only on the
 // slot a task moves through. The producer links the next chunk before it publishes the last slot
 // of the current one, so a consumer that finishes a chunk always finds its successor and frees
-// the chunk it left.
+// the chunk it left. The tail lock is held for a few dozen nanoseconds, so a producer that waits
+// spins; the head lock is a std::mutex, so surplus consumers sleep instead of crowding it. The
+// consumers keep a copy of the published position: while the queue has a backlog they do not read
+// the line the producers write.
 //
 // A consumer with nothing to take spins for a few microseconds, then sleeps on a condition
 // variable. A producer wakes a sleeper only when one is registered and not yet signaled, so a
@@ -109,19 +110,8 @@ class PoolQueue {
 		T* item(std::size_t i) noexcept { return std::launder(static_cast<T*>(at(i))); }
 	};
 
-#if defined(POOLQ_SPINLOCK) || defined(POOLQ_SPIN_TAIL)
-	using TailLock = PoolSpinMutex;
-#else
-	using TailLock = std::mutex;
-#endif
-#if defined(POOLQ_SPINLOCK)
-	using EndLock = PoolSpinMutex;
-#else
-	using EndLock = std::mutex;
-#endif
-
 	// Producers: the tail lock and what it guards.
-	alignas(line) TailLock _tl;
+	alignas(line) PoolSpinMutex _tl;
 	Chunk* _tail;
 	std::size_t _tail_idx = 0;
 	std::atomic<std::size_t> _tasks_pushed{0};  // truthy items pushed; stored under _tl
@@ -130,7 +120,7 @@ class PoolQueue {
 	alignas(line) std::atomic<std::size_t> _tail_pos{0};
 
 	// Consumers: the head lock and what it guards.
-	alignas(line) EndLock _hl;
+	alignas(line) std::mutex _hl;
 	Chunk* _head;
 	std::size_t _head_idx = 0;
 	std::atomic<std::size_t> _head_pos{0};      // items taken; stored under _hl
@@ -225,7 +215,7 @@ public:
 	void push(T&& item) {
 		const bool counted = static_cast<bool>(item);
 		{
-			std::lock_guard<TailLock> lk(_tl);
+			std::lock_guard<PoolSpinMutex> lk(_tl);
 			push_locked(std::move(item), counted, std::memory_order_seq_cst);
 		}
 		wake(1);
@@ -239,7 +229,7 @@ public:
 			return;
 		}
 		{
-			std::lock_guard<TailLock> lk(_tl);
+			std::lock_guard<PoolSpinMutex> lk(_tl);
 			for (std::size_t i = 0; i < count; ++i) {
 				T item(std::move(*first++));
 				const bool counted = static_cast<bool>(item);
@@ -253,14 +243,13 @@ public:
 	// under the head lock before a truthy item stops counting in size(), so the item is always in
 	// size() or in a claim, never in neither.
 	bool try_pop(T& out, std::atomic<std::size_t>* claim = nullptr) {
-#ifdef POOLQ_TAIL_CACHE
 		// While the queue has a backlog the consumers' copy of the tail says so, and the line the
 		// producers write is not read.
 		if (_head_pos.load(std::memory_order_relaxed) == _tail_cache.load(std::memory_order_relaxed) &&
 			_head_pos.load(std::memory_order_relaxed) == _tail_pos.load(std::memory_order_acquire)) {
 			return false;
 		}
-		std::lock_guard<EndLock> lk(_hl);
+		std::lock_guard<std::mutex> lk(_hl);
 		const auto pos = _head_pos.load(std::memory_order_relaxed);
 		if (pos == _tail_cache.load(std::memory_order_relaxed)) {
 			const auto tail = _tail_pos.load(std::memory_order_acquire);
@@ -269,16 +258,6 @@ public:
 			}
 			_tail_cache.store(tail, std::memory_order_relaxed);
 		}
-#else
-		if (_head_pos.load(std::memory_order_relaxed) == _tail_pos.load(std::memory_order_acquire)) {
-			return false;
-		}
-		std::lock_guard<EndLock> lk(_hl);
-		const auto pos = _head_pos.load(std::memory_order_relaxed);
-		if (pos == _tail_pos.load(std::memory_order_acquire)) {
-			return false;
-		}
-#endif
 		T* p = _head->item(_head_idx);
 		out = std::move(*p);
 		p->~T();
