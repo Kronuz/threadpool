@@ -26,9 +26,22 @@
 	} while (0)
 
 // Counts operator new calls on this thread while armed, to see whether storing a task allocates.
+// A sanitizer build keeps its own operator new, so the counts are only checked without one.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#  define COUNT_ALLOCATIONS 0
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#    define COUNT_ALLOCATIONS 0
+#  endif
+#endif
+#ifndef COUNT_ALLOCATIONS
+#  define COUNT_ALLOCATIONS 1
+#endif
+
 static thread_local bool counting = false;
 static thread_local int allocations = 0;
 
+#if COUNT_ALLOCATIONS
 void* operator new(std::size_t n) {
 	if (counting) {
 		++allocations;
@@ -40,6 +53,10 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#  define CHECK_ALLOCATIONS(n) CHECK(allocations == (n))
+#else
+#  define CHECK_ALLOCATIONS(n) ((void)0)
+#endif
 
 using threadpool_detail::SmallTask;
 
@@ -138,11 +155,11 @@ int main() {
 		allocations = 0;
 		SmallTask inl([h, a] { *h += static_cast<int>(a[4]); });
 		CHECK(sizeof(inl) <= 64);
-		CHECK(allocations == 0);
+		CHECK_ALLOCATIONS(0);
 		SmallTask moved(std::move(inl));
 		SmallTask assigned;
 		assigned = std::move(moved);
-		CHECK(allocations == 0);
+		CHECK_ALLOCATIONS(0);
 		counting = false;
 		assigned();
 		CHECK(hits == 5);
@@ -152,9 +169,9 @@ int main() {
 		allocations = 0;
 		SmallTask boxed([h, big] { *h += static_cast<int>(big[7]); });
 		escape(&boxed);
-		CHECK(allocations == 1);
+		CHECK_ALLOCATIONS(1);
 		SmallTask moved_boxed(std::move(boxed));  // moving a boxed task moves the pointer
-		CHECK(allocations == 1);
+		CHECK_ALLOCATIONS(1);
 		counting = false;
 		moved_boxed();
 		CHECK(hits == 13);
@@ -216,7 +233,7 @@ int main() {
 		allocations = 0;
 		SmallTask tm{ThrowingMove(&hits)};
 		escape(&tm);
-		CHECK(allocations == 1);  // boxed
+		CHECK_ALLOCATIONS(1);  // boxed
 		counting = false;
 		SmallTask tm2(std::move(tm));
 		tm2();
