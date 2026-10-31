@@ -24,21 +24,25 @@
 #pragma once
 
 #include <array>                 // for std::array
+#include <atomic>                // for std::atomic
 #include <cassert>               // for assert
 #include <chrono>                // for std::chrono
 #include <cstddef>               // for std::size_t
 #include <format>                // for std::vformat, std::make_format_args
 #include <functional>            // for std::function
-#include <future>                // for std::future, std::packaged_task
+#include <future>                // for std::future, std::packaged_task, std::promise
 #include <memory>                // for std::shared_ptr, std::unique_ptr
 #include <stdexcept>             // for std::runtime_error
 #include <string>                // for std::string
 #include <tuple>                 // for std::make_tuple, std::apply
+#include <type_traits>           // for std::invoke_result_t
 #include <vector>                // for std::vector
 
-#include "blocking_concurrent_queue.h"
+#include "blocking_concurrent_queue.h"  // not used by the pool; kept for consumers that include it from here
 #include "concurrent_queue.h"    // for ConcurrentQueue (used by TaskQueue)
 #include "likely.h"              // for likely, unlikely
+#include "pool_queue.h"          // for PoolQueue, the workers' queue
+#include "small_task.h"          // for SmallTask, the queued form of a std::function<void()>
 #include "thread.hh"             // for Thread
 
 // Tracing is optional and fully injectable. Define THREADPOOL_TRACE_HEADER (a
@@ -91,14 +95,17 @@ class ThreadPool;
 template <typename TaskType, ThreadPolicyType thread_policy>
 class ThreadPoolThread : public Thread<ThreadPoolThread<TaskType, thread_policy>, thread_policy> {
 	ThreadPool<TaskType, thread_policy>* _pool;
+	std::size_t _idx;
 	std::string _name;
 
 public:
 	ThreadPoolThread() noexcept :
-		_pool(nullptr) {}
+		_pool(nullptr),
+		_idx(0) {}
 
 	ThreadPoolThread(std::size_t idx, ThreadPool<TaskType, thread_policy>* pool) noexcept :
 		_pool(pool),
+		_idx(idx),
 		_name(std::vformat(pool->_format, std::make_format_args(idx))) {}
 
 	void operator()();
@@ -111,11 +118,14 @@ template <typename>
 struct TaskWrapper;
 
 
+// The callable is held in a threadpool_detail::SmallTask, which accepts what std::function<void()>
+// accepts (and callables that only move) and stores a small one inline, so queueing a task of up
+// to SmallTask::inline_size bytes does not allocate.
 template <>
 struct TaskWrapper<std::function<void()>> {
-	std::function<void()> t;
+	threadpool_detail::SmallTask t;
 
-	TaskWrapper() {}
+	TaskWrapper() noexcept {}
 
 	template <typename T>
 	TaskWrapper(T&& t) :
@@ -179,26 +189,29 @@ template <typename TaskType = std::function<void()>, ThreadPolicyType thread_pol
 class ThreadPool {
 	friend ThreadPoolThread<TaskType, thread_policy>;
 
+	// One worker's "a task is running" flag on a line of its own: running_size() sums them, so a
+	// task start and end are plain stores, not read-modify-writes on a counter all workers share.
+	struct alignas(128) Running {
+		std::atomic<std::size_t> n{0};
+	};
+
 	std::vector<ThreadPoolThread<TaskType, thread_policy>> _threads;
-	BlockingConcurrentQueue<TaskWrapper<TaskType>> _queue;
+	threadpool_detail::PoolQueue<TaskWrapper<TaskType>> _queue;
+	std::unique_ptr<Running[]> _running;
 
 	const char* _format;
 
 	std::atomic_bool _ending;
 	std::atomic_bool _finished;
-	std::atomic_size_t _enqueued;
-	std::atomic_size_t _running;
 	std::atomic_size_t _workers;
 
 public:
-	ThreadPool(const char* format, std::size_t num_threads, std::size_t queue_size = 1000) :
+	ThreadPool(const char* format, std::size_t num_threads, std::size_t /*queue_size*/ = 1000) :
 		_threads(num_threads),
-		_queue(queue_size),
+		_running(new Running[num_threads]),
 		_format(format),
 		_ending(false),
 		_finished(false),
-		_enqueued(0),
-		_running(0),
 		_workers(0) {
 		for (std::size_t idx = 0; idx < num_threads; ++idx) {
 			_threads[idx] = ThreadPoolThread<TaskType, thread_policy>(idx, this);
@@ -218,19 +231,19 @@ public:
 
 	void clear() {
 		TaskWrapper<TaskType> task;
-		while (_queue.try_dequeue(task)) {
-			if likely(task) {
-				_enqueued.fetch_sub(1, std::memory_order_relaxed);
-			}
-		}
+		while (_queue.try_pop(task)) {}
 	}
 
 	std::size_t size() {
-		return _enqueued.load(std::memory_order_relaxed);
+		return _queue.size();
 	}
 
 	std::size_t running_size() {
-		return _running.load(std::memory_order_relaxed);
+		std::size_t running = 0;
+		for (std::size_t idx = 0; idx < _threads.size(); ++idx) {
+			running += _running[idx].n.load(std::memory_order_relaxed);
+		}
+		return running;
 	}
 
 	std::size_t threadpool_capacity() {
@@ -267,7 +280,7 @@ public:
 	void end() {
 		if (!_ending.exchange(true, std::memory_order_release)) {
 			for (std::size_t idx = 0; idx < _threads.size(); ++idx) {
-				_queue.enqueue(nullptr);
+				_queue.push(TaskWrapper<TaskType>(nullptr));
 			}
 		}
 	}
@@ -276,7 +289,7 @@ public:
 	void finish() noexcept {
 		if (!_finished.exchange(true, std::memory_order_release)) {
 			for (std::size_t idx = 0; idx < _threads.size(); ++idx) {
-				_queue.enqueue(nullptr);
+				_queue.push(TaskWrapper<TaskType>(nullptr));
 			}
 		}
 	}
@@ -294,30 +307,52 @@ public:
 
 	template <typename It>
 	auto enqueue_bulk(It itemFirst, std::size_t count) {
-		_enqueued.fetch_add(count, std::memory_order_release);
-		if unlikely(!_queue.enqueue_bulk(std::forward<It>(itemFirst), count)) {
-			_enqueued.fetch_sub(count, std::memory_order_release);
-			return false;
-		}
+		_queue.push_bulk(std::forward<It>(itemFirst), count);
 		return true;
 	}
 
 	template <typename Func>
 	auto enqueue(Func&& func) {
-		_enqueued.fetch_add(1, std::memory_order_release);
-		if unlikely(!_queue.enqueue(std::forward<Func>(func))) {
-			_enqueued.fetch_sub(1, std::memory_order_release);
-			return false;
-		}
+		_queue.push(TaskWrapper<TaskType>(std::forward<Func>(func)));
 		return true;
+	}
+
+	// Runs func(args...) on a worker, with no future: the call is queued as it is, where async()
+	// also makes the shared state a future needs. A worker logs what it throws (L_EXC).
+	template <typename Func, typename... Args>
+	auto post(Func&& func, Args&&... args) {
+		return enqueue([
+			func = std::forward<Func>(func),
+			args = std::make_tuple(std::forward<Args>(args)...)
+		]() mutable {
+			std::apply(std::move(func), std::move(args));
+		});
 	}
 
 	template <typename Func, typename... Args>
 	auto async(Func&& func, Args&&... args) {
-		auto packaged_task = package(std::forward<Func>(func), std::forward<Args>(args)...);
-		auto future = packaged_task.get_future();
-		if unlikely(!enqueue([packaged_task = std::move(packaged_task)]() mutable {
-			packaged_task();
+		using Result = std::invoke_result_t<Func, Args...>;
+		std::promise<Result> promise;
+		auto future = promise.get_future();
+		// The promise is the future's shared state and the only allocation a small call needs;
+		// package() would add a second one for the packaged task's own copy of the call. A task
+		// dropped before it runs (clear(), a destroyed pool) breaks the promise, as a packaged
+		// task does.
+		if unlikely(!enqueue([
+			promise = std::move(promise),
+			func = std::forward<Func>(func),
+			args = std::make_tuple(std::forward<Args>(args)...)
+		]() mutable {
+			try {
+				if constexpr (std::is_void_v<Result>) {
+					std::apply(std::move(func), std::move(args));
+					promise.set_value();
+				} else {
+					promise.set_value(std::apply(std::move(func), std::move(args)));
+				}
+			} catch (...) {
+				promise.set_exception(std::current_exception());
+			}
 		})) {
 			throw std::runtime_error("Cannot enqueue task to threadpool");
 		}
@@ -327,6 +362,18 @@ public:
 	bool finished() {
 		return _finished.load(std::memory_order_relaxed);
 	}
+
+#ifdef THREADPOOL_QUEUE_STATS
+	// Sleeping workers that timed out and found a task waiting (a wakeup was lost); test builds only.
+	std::size_t lost_wakeups() const {
+		return _queue.rescued.load(std::memory_order_relaxed);
+	}
+
+	// Wakeups handed to sleeping workers; test builds only.
+	std::size_t wakeups() const {
+		return _queue.signals.load(std::memory_order_relaxed);
+	}
+#endif
 };
 
 
@@ -343,18 +390,19 @@ inline void
 ThreadPoolThread<TaskType, thread_policy>::operator()()
 {
 	_pool->_workers.fetch_add(1, std::memory_order_relaxed);
+	auto& running = _pool->_running[_idx].n;
 	while (!_pool->_finished.load(std::memory_order_acquire)) {
 		TaskWrapper<TaskType> task;
-		auto valid = _pool->_queue.wait_dequeue_timed(task, 100000);  // wait 100ms
+		// Wait up to 100ms. The queue sets running before the task leaves size(), so a task is
+		// always counted in one of them.
+		auto valid = _pool->_queue.pop(task, 100ms, &running);
 		if likely(valid && task) {
-			_pool->_running.fetch_add(1, std::memory_order_relaxed);
-			_pool->_enqueued.fetch_sub(1, std::memory_order_release);
 			try {
 				task();
 			} catch (...) {
 				L_EXC("ERROR: Task died with an unhandled exception");
 			}
-			_pool->_running.fetch_sub(1, std::memory_order_release);
+			running.store(0, std::memory_order_release);
 		} else if (_pool->_ending.load(std::memory_order_acquire)) {
 			break;
 		}
