@@ -94,9 +94,10 @@ public:
 // consumers keep a copy of the published position: while the queue has a backlog they do not read
 // the line the producers write.
 //
-// A consumer with nothing to take spins for a few microseconds, then sleeps on a condition
-// variable. A producer wakes a sleeper only when one is registered and not yet signaled, so a
-// flood of tasks with busy or spinning workers does not signal at all.
+// A consumer with nothing to take sleeps on a condition variable. A producer wakes a sleeper only
+// when one is registered and not yet signaled, so a flood of tasks that keeps the workers busy
+// does not signal at all. Consumers do not spin before they sleep: a future round trip, where the
+// worker sleeps as the caller wakes, is faster when the worker's core is free for the caller.
 template <typename T, std::size_t ChunkSlots = 64>
 class PoolQueue {
 	static_assert(std::is_nothrow_move_constructible_v<T>, "PoolQueue holds nothrow-movable items");
@@ -282,17 +283,6 @@ public:
 		if (try_pop(out, claim)) {
 			return true;
 		}
-		// Spin: the next item is usually a few hundred nanoseconds away.
-		const auto spin_until = std::chrono::steady_clock::now() + spin;
-		for (unsigned i = 1;; ++i) {
-			pool_relax();
-			if (_head_pos.load(std::memory_order_relaxed) != _tail_pos.load(std::memory_order_acquire) && try_pop(out, claim)) {
-				return true;
-			}
-			if (i % 16 == 0 && std::chrono::steady_clock::now() >= spin_until) {
-				break;
-			}
-		}
 		const auto deadline = std::chrono::steady_clock::now() + timeout;
 		for (;;) {
 			bool timed_out = false;
@@ -341,13 +331,6 @@ public:
 		const auto pushed = _tasks_pushed.load(std::memory_order_relaxed);
 		return pushed > popped ? pushed - popped : 0;
 	}
-
-	// How long a consumer with nothing to take spins before it sleeps.
-	#ifdef POOLQ_SPIN_NS
-	static constexpr std::chrono::nanoseconds spin{POOLQ_SPIN_NS};
-#else
-	static constexpr std::chrono::nanoseconds spin{4000};
-#endif
 };
 
 }  // namespace threadpool_detail
