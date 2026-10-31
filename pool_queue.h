@@ -343,7 +343,11 @@ public:
 	}
 
 	// How long a consumer with nothing to take spins before it sleeps.
+	#ifdef POOLQ_SPIN_NS
+	static constexpr std::chrono::nanoseconds spin{POOLQ_SPIN_NS};
+#else
 	static constexpr std::chrono::nanoseconds spin{4000};
+#endif
 };
 
 }  // namespace threadpool_detail
