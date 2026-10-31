@@ -362,6 +362,13 @@ public:
 	bool finished() {
 		return _finished.load(std::memory_order_relaxed);
 	}
+
+#ifdef THREADPOOL_QUEUE_STATS
+	// Sleeping workers that timed out and found a task waiting (a wakeup was lost); test builds only.
+	std::size_t lost_wakeups() const {
+		return _queue.rescued.load(std::memory_order_relaxed);
+	}
+#endif
 };
 
 

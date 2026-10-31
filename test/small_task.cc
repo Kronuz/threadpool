@@ -43,6 +43,9 @@ void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 using threadpool_detail::SmallTask;
 
+// Makes the compiler treat the object as used, so it cannot elide the allocation behind it.
+static void escape(void* p) { asm volatile("" : : "r"(p) : "memory"); }
+
 // Counts constructions and destructions, to prove a closure is destroyed exactly once.
 struct Tracker {
 	static inline std::atomic<int> alive{0};
@@ -148,6 +151,7 @@ int main() {
 		counting = true;
 		allocations = 0;
 		SmallTask boxed([h, big] { *h += static_cast<int>(big[7]); });
+		escape(&boxed);
 		CHECK(allocations == 1);
 		SmallTask moved_boxed(std::move(boxed));  // moving a boxed task moves the pointer
 		CHECK(allocations == 1);
@@ -211,6 +215,7 @@ int main() {
 		counting = true;
 		allocations = 0;
 		SmallTask tm{ThrowingMove(&hits)};
+		escape(&tm);
 		CHECK(allocations == 1);  // boxed
 		counting = false;
 		SmallTask tm2(std::move(tm));
