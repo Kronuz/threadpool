@@ -94,11 +94,44 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(work_wait_test PRIVATE threadpool)
   add_test(NAME work_wait COMMAND work_wait_test)
 
+  # The pool's queue and tasks: SmallTask, the old pool as an oracle, stress for TSan/ASan.
+  add_executable(small_task_test test/small_task.cc)
+  target_link_libraries(small_task_test PRIVATE threadpool)
+  add_test(NAME small_task COMMAND small_task_test)
+
+  add_executable(pool_diff_test test/pool_diff.cc)
+  target_link_libraries(pool_diff_test PRIVATE threadpool)
+  target_include_directories(pool_diff_test PRIVATE test)
+  add_test(NAME pool_diff COMMAND pool_diff_test)
+
+  add_executable(pool_stress_test test/pool_stress.cc)
+  target_link_libraries(pool_stress_test PRIVATE threadpool)
+  add_test(NAME pool_stress COMMAND pool_stress_test)
+
   # Benchmarks (not tests): -DTHREADPOOL_BUILD_BENCH=ON builds them; see bench/.
   option(THREADPOOL_BUILD_BENCH "Build the benchmarks" OFF)
   if(THREADPOOL_BUILD_BENCH)
     add_executable(kernel_time bench/kernel_time.cc)
     target_link_libraries(kernel_time PRIVATE threadpool)
+
+    # enqueue_bench compares ThreadPool with the frozen pre-change pool, a mutex + condition
+    # variable pool and, when found, standalone asio (-DASIO_INCLUDE_DIR=... or a system asio;
+    # otherwise it is fetched here, never by the library).
+    add_executable(enqueue_bench bench/enqueue_bench.cc)
+    target_link_libraries(enqueue_bench PRIVATE threadpool)
+    target_include_directories(enqueue_bench PRIVATE test)
+    find_path(THREADPOOL_ASIO_INCLUDE asio.hpp HINTS ${ASIO_INCLUDE_DIR} /opt/homebrew/include /usr/local/include)
+    if(NOT THREADPOOL_ASIO_INCLUDE)
+      include(FetchContent)
+      FetchContent_Declare(asio GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git GIT_TAG asio-1-30-2)
+      FetchContent_GetProperties(asio)
+      if(NOT asio_POPULATED)
+        FetchContent_Populate(asio)
+      endif()
+      set(THREADPOOL_ASIO_INCLUDE "${asio_SOURCE_DIR}/asio/include")
+    endif()
+    target_include_directories(enqueue_bench SYSTEM PRIVATE "${THREADPOOL_ASIO_INCLUDE}")
+    target_compile_definitions(enqueue_bench PRIVATE ASIO_STANDALONE)
   endif()
 
   # A runnable tour of the library (not a test): build & run ./build/threadpool_demo
