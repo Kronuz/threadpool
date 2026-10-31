@@ -37,6 +37,10 @@ using namespace std::chrono_literals;
 
 namespace {
 
+// Whether a pool has post(): the pool under test does, its frozen predecessor does not.
+template <typename P>
+concept HasPost = requires(P& p, void (*f)()) { p.post(f); };
+
 void wait_until(const std::function<bool()>& pred) {
 	auto deadline = std::chrono::steady_clock::now() + 20s;
 	while (!pred()) {
@@ -111,7 +115,7 @@ Observed run_script(const std::vector<Op>& ops) {
 				++queued;
 				break;
 			case Op::post:
-				if constexpr (requires { pool.post([] {}); }) {
+				if constexpr (HasPost<Pool>) {
 					pool.post([&record](int i) { record(i); }, id);
 				} else {
 					pool.enqueue([&record, id] { record(id); });
