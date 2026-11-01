@@ -59,6 +59,41 @@ releases, so entries are dated.
   condition variable pool and `asio::thread_pool`, with idle-CPU, round-trip and
   trickle modes.
 
+### Performance
+
+`bench/enqueue_bench.cc`, `ThreadPool::enqueue` of a trivial task from P producers into W
+workers, ns per task, best of 7 runs. `old` is the pool before this change, frozen in
+`test/threadpool_old.hh`; `naive` is a mutex and condition variable pool; `asio` is
+`asio::thread_pool`. The spread (slowest over fastest of the 7 runs) is 1.04 to 1.4 except
+where noted.
+
+Apple M4 Pro (arm64):
+
+| P x W | old | new | naive | asio |
+|---|---|---|---|---|
+| 1 x 1 | 65 | 19 | 32 | 49 |
+| 1 x 4 | 262 | 34 | 157 | 227 |
+| 1 x 8 | 2371 | 35 (spread 3.0) | 1643 | 1045 |
+| 4 x 1 | 75 | 11 | 56 | 79 |
+| 4 x 4 | 127 | 34 | 73 | 110 |
+| 4 x 8 | 129 | 32 | 135 | 177 |
+
+Intel Core i9-9980HK (x86_64):
+
+| P x W | old | new | naive | asio |
+|---|---|---|---|---|
+| 1 x 1 | 249 | 32 | 132 | 225 |
+| 1 x 4 | 1716 | 126 | 967 | 840 |
+| 1 x 8 | 6196 | 223 (spread 1.8) | 1690 | 2289 |
+| 4 x 1 | 269 | 40 | 148 | 244 |
+| 4 x 4 | 533 | 146 | 226 | 389 |
+| 4 x 8 | 843 | 221 | 525 | 708 |
+
+Idle pools use the same CPU as before (0.04% of a core for 4 idle workers on the M4 Pro,
+0.1% on the i9), and a future round trip takes the same 9 to 10 microseconds. One task
+submitted every microsecond starts after 3 microseconds on the M4 Pro and 5 on the i9,
+against 8 and 7 before.
+
 ### Unchanged
 
 - The API, `ThreadPolicyType`, the two-phase `end()`/`finish()` shutdown, the 100 ms wake

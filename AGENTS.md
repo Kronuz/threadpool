@@ -36,7 +36,6 @@ CMakeLists.txt                STATIC library target `threadpool` (+ alias thread
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, quick start.
 docs/API.md                   The API reference and the tracing hooks.
-docs/threadpool.d2            The README diagram's source (docs/threadpool.svg is rendered from it).
 examples/demo.cc              A runnable tour (target threadpool_demo).
 ARCHITECTURE.md               Internal design, concurrency model, trade-offs.
 ```
