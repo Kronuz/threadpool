@@ -31,7 +31,7 @@ test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, ca
 test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 child-group waits, the V5 guard.
 test/work_wait.cc             Waits: abort on a stack cycle, inversion, width, wake, resources, random acyclic graphs; on_idle.
 docs/mechanisms/work-pool.md  How WorkPool works, why, and what guards each invariant.
-bench/                        enqueue_bench.cc (trivial-task throughput against the old pool, a naive pool, asio; idle, latency, trickle modes), kernel_time.cc (both THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
+bench/                        enqueue_bench.cc (trivial-task throughput against the old pool, a naive pool, asio 1.30.2 fetched at its tag; checks that every pool ran every task; idle, latency, trickle modes), kernel_time.cc (both THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
 CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, quick start.
