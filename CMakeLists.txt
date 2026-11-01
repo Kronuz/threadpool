@@ -115,13 +115,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_link_libraries(kernel_time PRIVATE threadpool)
 
     # enqueue_bench compares ThreadPool with the frozen pre-change pool, a mutex + condition
-    # variable pool and, when found, standalone asio (-DASIO_INCLUDE_DIR=... or a system asio;
-    # otherwise it is fetched here, never by the library).
+    # variable pool and standalone asio. asio is the pinned release below, fetched here and never
+    # by the library; -DASIO_INCLUDE_DIR=<asio>/asio/include uses another checkout instead.
     add_executable(enqueue_bench bench/enqueue_bench.cc)
     target_link_libraries(enqueue_bench PRIVATE threadpool)
     target_include_directories(enqueue_bench PRIVATE test)
-    find_path(THREADPOOL_ASIO_INCLUDE asio.hpp HINTS ${ASIO_INCLUDE_DIR} /opt/homebrew/include /usr/local/include)
-    if(NOT THREADPOOL_ASIO_INCLUDE)
+    if(ASIO_INCLUDE_DIR)
+      set(THREADPOOL_ASIO_INCLUDE "${ASIO_INCLUDE_DIR}")
+    else()
       include(FetchContent)
       FetchContent_Declare(asio GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git GIT_TAG asio-1-30-2)
       FetchContent_GetProperties(asio)

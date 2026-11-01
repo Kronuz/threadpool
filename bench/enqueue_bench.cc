@@ -20,7 +20,8 @@
 //   local   each task bumps a counter of its worker's own (what a pool's own cost looks like)
 //   cap40   as local, with 40 bytes captured: past std::function's inline buffer on libc++
 //
-// Build with -DTHREADPOOL_BUILD_BENCH=ON (finds asio, or fetches it), or by hand:
+// Build with -DTHREADPOOL_BUILD_BENCH=ON (fetches asio 1.30.2, or takes -DASIO_INCLUDE_DIR=<asio>/asio/include),
+// or by hand:
 //   c++ -std=c++20 -O2 -I. -Itest [-DASIO_STANDALONE -I<asio>] bench/enqueue_bench.cc thread.cc
 #include <algorithm>
 #include <atomic>
@@ -152,6 +153,7 @@ struct Shared {
 	static void wait(unsigned long) {
 		shared_done.wait(0, std::memory_order_acquire);
 	}
+	static bool exact(unsigned long target) { return shared_count.load(std::memory_order_acquire) == target; }
 };
 
 struct Local {
@@ -169,6 +171,7 @@ struct Local {
 			std::this_thread::sleep_for(std::chrono::microseconds(20));
 		}
 	}
+	static bool exact(unsigned long target) { return registry_sum() == target; }
 };
 
 struct Cap40 : Local {
@@ -210,7 +213,13 @@ double run_once(int P, long N, Submit&& submit) {
 		t.join();
 	}
 	Workload::wait(target);
-	return (now_s() - t0) * 1e9 / static_cast<double>(total);
+	const double ns = (now_s() - t0) * 1e9 / static_cast<double>(total);
+	// Every pool must have run exactly the tasks it was given: a lost or repeated task aborts.
+	if (!Workload::exact(target)) {
+		std::fprintf(stderr, "a pool ran a different number of tasks than it was given\n");
+		std::abort();
+	}
+	return ns;
 }
 
 struct Result {
@@ -426,6 +435,9 @@ int main(int argc, char** argv) {
 	const int reps = argc > 1 ? std::atoi(argv[1]) : 7;
 	const long N = argc > 2 ? std::atol(argv[2]) : 100000;
 	const char* only = argc > 3 ? argv[3] : "";
+#ifdef HAVE_ASIO
+	std::printf("asio %d.%d.%d\n", ASIO_VERSION / 100000, ASIO_VERSION / 100 % 1000, ASIO_VERSION % 100);
+#endif
 	if (std::string(only) == "trickle") {
 		for (double gap : {1000.0, 5000.0, 50000.0}) {
 			run_trickle(gap, N);
