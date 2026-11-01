@@ -2,6 +2,8 @@
 
 # scheduler
 
+> Paths under `.scratch/` name local scratch files (benchmark scripts) that are not part of the repository.
+
 - Design: the research note `docs/research/scheduler.md` on `research/scheduler`,
   section 6: R1, R2, R3, the additive API sketch,
   and the corrections at its top (read at `150152c`). Reviews: none yet.

@@ -2,6 +2,8 @@
 
 # phase7c-l2
 
+> Paths under `.scratch/` name local scratch files (probes, logs, mutants) that are not part of the repository.
+
 - Design: Xapiand `docs/design/phase7c.md` D4, D5, D7 and section 5's L2; `docs/reviews/phase7c-design.md` C8
   (F15) and the offload review's V2 and V5 (`docs/reviews/engine-offload-architect.md`); the research note
   `docs/research/scheduler.md` R1 to R3 on `research/scheduler`. Reviews: none yet.

@@ -1,5 +1,7 @@
 # Phase 7c L2 code review (WorkPool: merge aging, block_guard, V2 waits)
 
+> Paths under `.scratch/` name local scratch files (probes, logs, builds) that are not part of the repository.
+
 Reviewer: code-reviewer, 2026-10-29. Subject: `threadpool:2ae90f0` on `phase7c/l2-scheduler` (from main `threadpool:394aaea`,
 includes `feature/scheduler`). Read: `work_pool.hh` (all of the L2 paths), the three test files, the ledger, `docs/mechanisms/work-pool.md`.
 

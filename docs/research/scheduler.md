@@ -1,5 +1,7 @@
 # One scheduler for tens of thousands of indexes
 
+> Paths under `.scratch/` name local scratch files (builds, logs) that are not part of the repository.
+
 - Date: 2026-10-18. Branch `research/scheduler`.
 - Ledger: `docs/status/research-scheduler.md`. Prototypes: `research/` (built only with
   `-DTHREADPOOL_BUILD_RESEARCH=ON`; nothing in the library changes).
