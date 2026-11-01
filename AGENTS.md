@@ -25,7 +25,8 @@ test/small_task.cc            SmallTask: empty states, inline vs boxed allocatio
 test/pool_diff.cc             The pool against the frozen test/threadpool_old.hh: random scripts, shutdown paths, async shapes, totals.
 test/pool_stress.cc           Stress and invariants for the queue and its wake protocol (TSan/ASan): counts, order, no lost wakeup, counted, destruction.
 test/threadpool_old.hh        The pool before PoolQueue and SmallTask, frozen in namespace threadpool_old. Never edit it.
-test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin.
+test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin, tickets per burst, widening.
+test/task_group_stress.cc     TaskGroup on 16 workers (TSan/ASan): bursts, many producers, FIFO, cancels, chains, teardown.
 test/work_pool.cc             WorkPool tests: delivery, reposts, a child-group wait, draining, ping-pong, idle CPU.
 test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
 test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 child-group waits, the V5 guard.
@@ -124,6 +125,16 @@ name is `threadpool`.
   tail for a few dozen nanoseconds and waiting on a `std::mutex` costs far more; many
   consumers on a spin lock stampede it, so surplus ones must sleep. Keep allocation out
   of what the tail lock guards but the one chunk per 64 pushes.
+- **A `TaskGroup` ticket runs its group's tasks back to back only while nothing else
+  waits on the pool queue** (`yield()`: the pool's `size()` against the group's own
+  tickets there, `finished()` and `ending()`); otherwise it requeues behind the other
+  work, which keeps groups round-robin. A group lists one ticket at a time: an enqueue
+  posts one only when every live ticket is held by a worker, and the worker that takes
+  a ticket lists the next before it runs its task, so a group of long tasks still
+  widens to `max_concurrency`. Posting a ticket per enqueue made each task of a burst
+  on 14 to 16 workers wake a worker through the queue's sleeper lock
+  (`test/task_group.cc` cases 7, 8 and 12 to 14 pin the order, the ticket count and
+  the widening).
 - **`ConcurrentQueue`/`BlockingConcurrentQueue` are mutex-backed, not lock-free.**
   `ConcurrentQueue` is a `std::deque` under a `std::mutex`; `BlockingConcurrentQueue`
   adds a condvar. `TaskQueue` uses them; the pool does not. Do not assume lock-free

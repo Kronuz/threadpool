@@ -24,7 +24,7 @@
 - `join(timeout = 60s) -> bool` — wait for workers; `false` on timeout.
 - `clear()` — drop queued (not-yet-running) tasks.
 - `size()`, `running_size()`, `threadpool_size()`, `threadpool_capacity()`,
-  `threadpool_workers()`, `finished()` — lock-free state queries.
+  `threadpool_workers()`, `finished()`, `ending()` — lock-free state queries.
 
 ## `TaskGroup<Pool = ThreadPool<>>` (`task_group.hh`)
 

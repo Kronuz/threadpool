@@ -229,18 +229,37 @@ bulk buffer is sized by `ConcurrentQueueDefaultTraits::block_size`.
 `TaskGroup<Pool>` (`task_group.hh`) layers owner-scoped cancellation and
 cross-group fairness over an unmodified `ThreadPool<std::function<void()>>`. Its
 state lives in a `shared_ptr<State>`: a mutex, a FIFO `std::deque` of boxed
-tasks, counters for tickets and running tasks, a `closed` flag, and an atomic
-`epoch`.
+tasks, counters for tickets and running tasks, a `closed` flag, an atomic
+`epoch`, and an atomic count of the group's tickets on the pool queue.
 
 A group never puts its tasks on the pool queue. It puts *tickets* there: a
 closure holding the `shared_ptr<State>` that pops and runs the group's oldest
 task. A group keeps at most `max_concurrency` tickets alive (default: the pool's
-thread count). After its task, a ticket requeues itself at the back of the pool
-queue if the group still has work, or retires. Because each ticket runs one task
-per trip through the pool's FIFO, groups are served round-robin, and a group with
-a thousand queued tasks occupies at most `max_concurrency` slots ahead of anyone
-else. With a one-thread pool, two busy groups alternate strictly.
+thread count) and lists them one at a time: an enqueue posts a ticket only when
+every live ticket is held by a worker, and the worker that takes a ticket lists
+the next one before it runs its first task, while tasks remain. A group so widens
+to `max_concurrency` one hand-off at a time, however long its tasks run, and a
+producer slower than the workers does not post a ticket, and wake a worker, for
+every task.
 
+After a task, the worker runs the group's next one if nothing but the group's own
+tickets waits on the pool queue; otherwise it requeues its ticket at the back, or
+retires it when the group has no work left. The task it runs next is the one its
+requeued ticket would have run on coming back to the front of the FIFO, so groups
+are still served round-robin: a group with a thousand queued tasks occupies at
+most `max_concurrency` turns ahead of anyone else, and with a one-thread pool two
+busy groups alternate strictly. A burst costs one trip through the pool queue per
+worker instead of one per task.
+
+- "Nothing but the group's own tickets" compares the pool's `size()` with the
+  group's count of its tickets on the queue: atomic loads, no pool lock. The count
+  goes up just before a ticket is pushed and down when a worker enters one, so
+  while one of the group's tickets is on its way into or out of the queue the
+  comparison can be off by one: the group may run one more task ahead of another
+  owner's, or requeue a ticket it could have kept. A worker also requeues once the
+  pool is stopping (`finish()` or `end()`), as a ticket did after every task, so a
+  busy group does not keep the pool from stopping. `Pool` therefore needs `enqueue`,
+  `threadpool_size`, `size`, `finished` and `ending`.
 - `cancel()` swaps the deque out under the lock and destroys it after unlocking,
   so dropped tasks die on the caller's thread. It bumps `epoch`; a running task's
   `TaskGroupStopToken` compares the epoch it started under with the current one.
@@ -255,7 +274,8 @@ else. With a one-thread pool, two busy groups alternate strictly.
   under the group's lock (a task's destructor may call into its own group).
 
 Fairness is per pool trip, not per thread: plain `pool.enqueue` work shares the
-same FIFO with the tickets. `pool.clear()` drops tickets the group still counts,
+same FIFO with the tickets, and a queued plain task makes a draining worker
+requeue its ticket behind it. `pool.clear()` drops tickets the group still counts,
 which strands its queued tasks; don't clear a pool that groups use.
 
 ## `WorkPool`

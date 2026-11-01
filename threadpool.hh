@@ -363,6 +363,11 @@ public:
 		return _finished.load(std::memory_order_relaxed);
 	}
 
+	// Whether end() was called: the workers exit as they reach its stop markers.
+	bool ending() {
+		return _ending.load(std::memory_order_relaxed);
+	}
+
 #ifdef THREADPOOL_QUEUE_STATS
 	// Sleeping workers that timed out and found a task waiting (a wakeup was lost); test builds only.
 	std::size_t lost_wakeups() const {

@@ -4,6 +4,77 @@ All notable changes to `threadpool`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the library has no
 releases, so entries are dated.
 
+## 2026-11-01
+
+### Changed
+
+- `TaskGroup` runs a burst on the workers that hold its tickets. After a task, a worker
+  runs the group's next one while nothing but the group's own tickets waits on the pool
+  queue, and requeues its ticket behind anything else, as every ticket did after every
+  task before. A group also lists one ticket at a time: an enqueue posts a ticket only
+  when every live ticket is held by a worker, and the worker that takes a ticket lists
+  the next before it runs its task, so a group still widens to `max_concurrency`, one
+  hand-off at a time. Round-robin across groups, FIFO within one, `max_concurrency`,
+  `cancel()`, stop tokens, exceptions and `wait()` are unchanged, and a draining worker
+  requeues once the pool is stopping, so `end()` and `finish()` behave as before.
+
+  The cause of the slow burst, from `sample` stacks of a 200 000-task burst on 16
+  workers: the workers outrun the one producer and sleep, a ticket retires as soon as
+  its group runs dry, and an enqueue posted a ticket whenever fewer than
+  `max_concurrency` were alive, so nearly every task posted one and woke a sleeper. Since
+  2026-10-31 that wake is a condition-variable signal plus the sleepers' mutex, which 14
+  to 16 parking workers keep busy: 65% of the producer's samples on the M4 Pro, 45% on
+  the i9, with 0.3 to 1.1 wakeups and 0.6 to 3.3 context switches per task. The
+  producers' spin lock, which the gate suspected, was 2% of the samples.
+
+### Added
+
+- `ThreadPool::ending()`: whether `end()` was called.
+- `test/task_group.cc`: a burst on busy workers lists exactly one ticket and takes fewer
+  than one per ten tasks (both fail with the previous `task_group.hh`), a group of tasks
+  that wait for each other widens to the pool and to its cap, and plain tasks interleave
+  with a draining group in FIFO order.
+- `test/task_group_stress.cc` (TSan and ASan): a 16-worker pool with bursts from one
+  producer and from four, a group of `max_concurrency` 1 in FIFO order, groups beside
+  plain tasks with cancels, tasks that post to their own group, and groups destroyed with
+  a burst queued.
+- `test/mutants.sh`: five `TaskGroup` mutants, each caught by `test/task_group.cc`.
+- `kernel_time [trials] [threads] [rows]`: `rows` picks some of handoff, burst, idle and
+  sleep; `kernel_time 5 16 burst` is the burst rows alone, on 16 workers.
+
+### Performance
+
+`kernel_time 1 W burst` (`bench/kernel_time.cc`): 200 000 tiny tasks from one producer,
+wall-clock ns per task until the last one ran, the median of 5 A/B/A rounds in one strict
+hold per machine. START is `e961e44`, before the pool's own queue; 2026-10-31 is `287b877`.
+
+| burst | M4 Pro: START | 2026-10-31 | now | i9: START | 2026-10-31 | now |
+|---|---|---|---|---|---|---|
+| `TaskGroup`, 4 workers | 345 | 235 | **115** | 1140 | 775 | **475** |
+| `TaskGroup`, 14 workers | 445 | 1365 | **125** | 1950 | 4210 | **525** |
+| `TaskGroup`, 16 workers | 490 | 1640 | **125** | 1725 | 3245 | **515** |
+
+Against START the `TaskGroup` burst is 3.0x to 3.9x faster on the M4 Pro and 2.4x to 3.8x
+on the i9 (A/A within 0.90 to 1.04), and its CPU per task on 16 workers fell from 4.3 to
+0.8 us (M4 Pro) and from 24 to 2.7 us (i9). The bare `ThreadPool` and `WorkPool` rows,
+`enqueue`, `async` and idle CPU run the same code as on 2026-10-31 (`enqueue_bench`'s binary
+is identical); all stay inside their A/A spread but the bare burst on 14 to 16 workers, which
+is bimodal in both builds (below).
+
+### Known
+
+- One task submitted every microsecond into 4 workers (`enqueue_bench 1 20000 trickle`)
+  starts later at the 99th percentile on the i9 than at START: 67 to 84 us against 44 to
+  47 us, with the median at 6.2 to 6.4 against 6.9 to 7.0 us and the pool's CPU per task
+  at 2.0 against 7.4 us. On the M4 Pro the same row is 3.2x better than START (15 against
+  49 us). It is the 2026-10-31 wake protocol, which wakes a worker only when one sleeps
+  unsignaled and never spins before sleeping; a spin would buy the tail back with CPU and
+  a slower future round trip (45% slower when it was tried), so the trade stays.
+- The bare `ThreadPool` burst on 14 to 16 workers of a fresh pool is bimodal on both
+  machines, at 2026-10-31 and now alike: on the i9 11 of 35 runs (7 of 20 at 2026-10-31,
+  4 of 15 now) took 2.7 to 5.3 us per task, as the workers outran the producer and it
+  woke one per task, and the rest 0.3 to 0.4 us; START took 5.6 to 5.9 us every time.
+
 ## 2026-10-31
 
 ### Changed

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Mutation checks for the pool's queue and tasks: each mutant breaks one thing that the tests are
-# meant to pin, builds the test that should notice, and must fail it. A surviving mutant means a
-# missing test. Run from the repository root:
+# Mutation checks for the pool's queue, its tasks and TaskGroup: each mutant breaks one thing that
+# the tests are meant to pin, builds the test that should notice, and must fail it. A surviving
+# mutant means a missing test. Run from the repository root:
 #
 #   CXX=g++ EXTRA="-I/path/with/config.h" test/mutants.sh
 #
@@ -81,6 +81,27 @@ run "post drops its call" threadpool.hh \
 	}" "(void)func; (void)args;
 		});
 	}" test/pool_stress.cc
+run "a worker keeps its group's ticket whatever waits on the pool queue" task_group.hh \
+	"return pool->size() > mine || pool->finished() || pool->ending();" "(void)mine; return false;" test/task_group.cc
+run "a worker that enters a ticket does not count it off the pool queue" task_group.hh \
+	"static void dispatch(const std::shared_ptr<State>& state) {
+		state->in_pool.fetch_sub(1, std::memory_order_relaxed);" "static void dispatch(const std::shared_ptr<State>& state) {" test/task_group.cc
+run "an enqueue posts a ticket while another is on its way to a worker" task_group.hh \
+	"if (tickets == running && tickets < max_tickets && !queued.empty()) {" \
+	"if (tickets < max_tickets && !queued.empty()) {" test/task_group.cc
+run "the worker that takes a ticket does not list the next before its task" task_group.hh \
+	"task = state->take(started);
+			widen = state->list();
+		}
+		for (;;) {" "task = state->take(started);
+			widen = false;
+		}
+		for (;;) {" test/task_group.cc
+run "a ticket that retires after a burst stays counted" task_group.hh \
+	"if (state->queued.empty()) {
+					--state->tickets;
+					if (state->running == 0) {" "if (state->queued.empty()) {
+					if (state->running == 0) {" test/task_group.cc
 
 if [ "$survived" -ne 0 ]; then
 	echo "some mutants survived"

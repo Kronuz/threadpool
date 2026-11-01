@@ -82,10 +82,13 @@ class TaskGroup {
 		std::mutex mtx;
 		std::condition_variable idle;
 		std::deque<Task> queued;
-		std::size_t tickets;         // tickets on the pool queue or running
-		std::size_t running;
+		std::size_t tickets;         // tickets on the pool queue, on their way to a worker, or held by one
+		std::size_t running;         // tasks running: outside mtx, also the tickets workers hold
 		std::atomic_bool closed;           // written under mtx
 		std::atomic<std::uint64_t> epoch;  // bumped by cancel(), written under mtx
+		// The group's tickets on the pool queue: up just before a ticket is pushed, down when a
+		// worker enters one, so it never counts fewer than the queue holds.
+		std::atomic<std::size_t> in_pool;
 
 		State(Pool* pool, std::size_t max_tickets) :
 			pool(pool),
@@ -93,7 +96,39 @@ class TaskGroup {
 			tickets(0),
 			running(0),
 			closed(false),
-			epoch(0) {}
+			epoch(0),
+			in_pool(0) {}
+
+		// Under mtx: whether to put one more ticket on the pool queue for the queued tasks. Only
+		// when every live ticket is held by a worker: one on its way to a worker will reach the
+		// tasks, and the worker that takes it lists the next. A group so widens one hand-off at a
+		// time up to max_tickets, and a producer slower than the workers does not post a ticket
+		// (and wake a worker) per task.
+		bool list() {
+			if (tickets == running && tickets < max_tickets && !queued.empty()) {
+				++tickets;
+				return true;
+			}
+			return false;
+		}
+
+		// Under mtx: takes the oldest task to run.
+		Task take(std::uint64_t& started) {
+			Task task = std::move(queued.front());
+			queued.pop_front();
+			++running;
+			started = epoch.load(std::memory_order_relaxed);
+			return task;
+		}
+
+		// Whether a worker that finished a task must put its ticket behind the pool's other work:
+		// something besides this group's own tickets waits on the pool queue, or the pool stops
+		// (finish() or end()). Atomic loads only, no lock of the pool's; off by one for the moment
+		// a ticket of the group's is on its way into or out of the queue (ARCHITECTURE.md).
+		bool yield() {
+			const auto mine = in_pool.load(std::memory_order_relaxed);
+			return pool->size() > mine || pool->finished() || pool->ending();
+		}
 	};
 
 	std::shared_ptr<State> _state;
@@ -103,50 +138,79 @@ class TaskGroup {
 		auto ticket = [state]() {
 			dispatch(state);
 		};
-		if unlikely(!state->pool->enqueue(std::move(ticket))) {
-			std::lock_guard<std::mutex> lk(state->mtx);
-			--state->tickets;
+		state->in_pool.fetch_add(1, std::memory_order_relaxed);
+		bool posted = false;
+		try {
+			posted = state->pool->enqueue(std::move(ticket));
+		} catch (...) {
+			unpost(state);
+			throw;
+		}
+		if unlikely(!posted) {
+			unpost(state);
 		}
 	}
 
-	// A ticket's body: run the group's oldest task, then requeue or retire.
-	static void dispatch(const std::shared_ptr<State>& state) {
-		Task task;
-		std::uint64_t epoch;
-		{
-			std::lock_guard<std::mutex> lk(state->mtx);
-			if (state->queued.empty()) {
-				--state->tickets;
-				return;
-			}
-			task = std::move(state->queued.front());
-			state->queued.pop_front();
-			++state->running;
-			epoch = state->epoch.load(std::memory_order_relaxed);
-		}
+	// A ticket that did not reach the pool queue.
+	static void unpost(const std::shared_ptr<State>& state) {
+		state->in_pool.fetch_sub(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lk(state->mtx);
+		--state->tickets;
+	}
+
+	static void run(const std::shared_ptr<State>& state, Task& task, std::uint64_t started) {
 		try {
-			const TaskGroupStopToken token(state->epoch, epoch);
+			const TaskGroupStopToken token(state->epoch, started);
 			(*task)(token);
 		} catch (...) {
 			L_EXC("ERROR: Task died with an unhandled exception");
 		}
 		// Captures die before wait() can observe the task as finished.
 		task.reset();
-		bool requeue;
+	}
+
+	// A ticket's body: runs the group's oldest task, and then the next one for as long as nothing
+	// but the group's own tickets waits on the pool queue; then requeues the ticket at the back or
+	// retires it. The task a worker runs next is the one its requeued ticket would have run when it
+	// came back to the front, so turns keep their order without a trip through the pool queue per
+	// task.
+	static void dispatch(const std::shared_ptr<State>& state) {
+		state->in_pool.fetch_sub(1, std::memory_order_relaxed);
+		Task task;
+		std::uint64_t started;
+		bool widen;
 		{
 			std::lock_guard<std::mutex> lk(state->mtx);
-			--state->running;
-			requeue = !state->queued.empty();
-			if (!requeue) {
+			if (state->queued.empty()) {
 				--state->tickets;
-				if (state->running == 0) {
-					state->idle.notify_all();
+				return;
+			}
+			task = state->take(started);
+			widen = state->list();
+		}
+		for (;;) {
+			if (widen) {
+				post_ticket(state);
+			}
+			run(state, task, started);
+			{
+				std::lock_guard<std::mutex> lk(state->mtx);
+				--state->running;
+				if (state->queued.empty()) {
+					--state->tickets;
+					if (state->running == 0) {
+						state->idle.notify_all();
+					}
+					return;
 				}
+				if (state->yield()) {
+					break;
+				}
+				task = state->take(started);
+				widen = state->list();
 			}
 		}
-		if (requeue) {
-			post_ticket(state);
-		}
+		post_ticket(state);
 	}
 
 public:
@@ -190,10 +254,7 @@ public:
 				return false;
 			}
 			_state->queued.push_back(std::move(task));
-			if (_state->tickets < _state->max_tickets) {
-				++_state->tickets;
-				ticket = true;
-			}
+			ticket = _state->list();
 		}
 		// The pool queue's lock is never taken under the group's lock.
 		if (ticket) {
