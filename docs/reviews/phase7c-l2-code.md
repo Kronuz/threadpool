@@ -231,7 +231,7 @@ many-indexes workload. Neither is a stated, load-bearing limit, so (a) cannot be
 - Xapiand D4 (`phase7c.md:203-207`) is the one own-group use: "a chore that waits for its own index's work calls `WorkGroup::wait`", and the
   carried V2 negative test is an own-group wait. Under the ruling that wait moves to the task that holds the turn (it awaits the group's idle
   notification) or the chore posts what it waits for to a child group.
-- No other repository under `~/code/Kronuz` uses `WorkGroup` or `help_until` (grep; only strata's binding).
+- No other repository in the Kronuz family uses `WorkGroup` or `help_until` (grep; only strata's binding).
 
 ### Practice elsewhere
 

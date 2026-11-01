@@ -5,7 +5,7 @@
 - Design: Xapiand `docs/design/phase7c.md` D4, D5, D7 and section 5's L2; `docs/reviews/phase7c-design.md` C8
   (F15) and the offload review's V2 and V5 (`docs/reviews/engine-offload-architect.md`); the research note
   `docs/research/scheduler.md` R1 to R3 on `research/scheduler`. Reviews: none yet.
-- Branch / worktree: `phase7c/l2-scheduler` at `~/code/Kronuz/threadpool-wt/l2-scheduler`, from
+- Branch: `phase7c/l2-scheduler`, from
   `feature/scheduler` at `threadpool:5caedce`, which already sits on main `threadpool:394aaea` (the rebase
   was a no-op, so no history was rewritten; `feature/scheduler` is untouched).
 - State: the architect's ruling on B2 and N1 (AL1, AL2, AR2) is implemented; B1, B3 and B4 closed in the re-check; re-check 2's

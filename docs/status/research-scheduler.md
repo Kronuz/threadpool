@@ -2,7 +2,7 @@
 
 - Design: none; this is a research note, `docs/research/scheduler.md`, for the performance
   engineer or designer to build from. Reviews: none yet.
-- Branch / worktree: `research/scheduler` at `~/code/Kronuz/threadpool-wt/research`, from
+- Branch: `research/scheduler`, from
   `origin/main` at `628679a`.
 - State: in review (the note is delivered; K1 to K6 met; the lead decides what lands)
 - Done criteria (set by the lead; contributors tick, never edit):

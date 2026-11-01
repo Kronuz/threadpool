@@ -1,6 +1,6 @@
 # One scheduler for tens of thousands of indexes
 
-- Date: 2026-10-18. Branch `research/scheduler` (worktree `~/code/Kronuz/threadpool-wt/research`).
+- Date: 2026-10-18. Branch `research/scheduler`.
 - Ledger: `docs/status/research-scheduler.md`. Prototypes: `research/` (built only with
   `-DTHREADPOOL_BUILD_RESEARCH=ON`; nothing in the library changes).
 - Machines: the Mac (Intel i9-9980HK, 8 cores / 16 threads, macOS 15, Apple clang 17) and

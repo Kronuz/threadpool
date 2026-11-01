@@ -2,10 +2,10 @@
 
 # scheduler
 
-- Design: the research note `docs/research/scheduler.md` on `research/scheduler`
-  (`~/code/Kronuz/threadpool-wt/research`), section 6: R1, R2, R3, the additive API sketch,
+- Design: the research note `docs/research/scheduler.md` on `research/scheduler`,
+  section 6: R1, R2, R3, the additive API sketch,
   and the corrections at its top (read at `150152c`). Reviews: none yet.
-- Branch / worktree: `feature/scheduler` at `~/code/Kronuz/threadpool-wt/scheduler`, from
+- Branch: `feature/scheduler`, from
   `origin/main` at `628679a`.
 - State: paused (quota), at the commit after `7549809`; rebased onto main `394aaea`.
 - Done criteria (set by the lead; contributors tick, never edit):
