@@ -135,30 +135,45 @@ Not for:
 
 ## ⚡ Performance
 
-`ThreadPool::enqueue` of a trivial task (one increment), from P producer threads into W
-workers, in nanoseconds per task: wall clock from the first submit until the last task
-has run, best of 7 runs. `naive` is a mutex and condition variable pool, `asio` is
-standalone Asio's `asio::thread_pool`. The spread (slowest over fastest of the 7 runs) is
-1.04 to 1.4 except where noted.
+`ThreadPool::enqueue` of a trivial task (one increment of a shared atomic), from P producer
+threads into W workers, in nanoseconds per task: wall clock from the first submit until the
+last task has run, the fastest of 7 runs. `naive` is a mutex and condition variable pool and
+`asio` is `asio::thread_pool` from standalone Asio 1.30.2. The spread (slowest run over
+fastest) is 1.04 to 1.4 except where noted.
 
 | P x W | threadpool, M4 Pro | naive | asio | threadpool, i9 | naive | asio |
 |---|---|---|---|---|---|---|
-| 1 x 1 | **19** | 32 | 49 | **32** | 132 | 225 |
-| 1 x 4 | **34** | 157 | 227 | **126** | 967 | 840 |
-| 1 x 8 | **35** (spread 3.0) | 1643 | 1045 | **223** (spread 1.8) | 1690 | 2289 |
-| 4 x 1 | **11** | 56 | 79 | **40** | 148 | 244 |
-| 4 x 4 | **34** | 73 | 110 | **146** | 226 | 389 |
-| 4 x 8 | **32** | 135 | 177 | **221** | 525 | 708 |
+| 1 x 1 | **17.6** | 34.3 | 49.6 | **29.6** | 123.8 | 221.7 |
+| 1 x 4 | **41.3** | 115.0 | 219.9 | **128.1** | 1106.5 | 882.1 |
+| 1 x 8 | **34.5** (spread 2.8) | 2505 | 1351 | **191.9** (spread 2.0) | 1405 | 2052 |
+| 4 x 1 | **22.6** | 63.7 | 72.3 | **39.4** | 140.8 | 237.0 |
+| 4 x 4 | **46.8** | 78.9 | 124.1 | **139.4** | 180.8 | 337.3 |
+| 4 x 8 | **32.6** | 133.6 (spread 1.6) | 123.1 (spread 1.6) | **163.9** (spread 1.7) | 419.0 | 650.9 |
 
-A task with a 40-byte closure (past `std::function`'s inline buffer in libc++) costs the
-same as a small one. Four idle workers use 0.04% of a core on the M4 Pro and 0.1% on the
-i9. A future round trip (`async(f).get()`, with a worker that sleeps as the caller wakes)
-takes 9 to 10 microseconds on both machines. One task submitted every microsecond starts
-after 3 microseconds on the M4 Pro and 5 on the i9.
+A task with a 40-byte closure (past `std::function`'s inline buffer in libc++) is no more than
+15% slower than a task that captures nothing in 11 of the 12 configurations; the i9's 4 x 1
+is 34% slower (47 against 35 ns). Four idle workers use 0.04% of a core on the M4 Pro and
+0.13% on the i9.
 
-Machines: Apple M4 Pro (arm64) and Intel Core i9-9980HK (x86_64), both on macOS with
-Apple clang, `-O2`. Build with `-DTHREADPOOL_BUILD_BENCH=ON` or the line at the top of
-[`bench/enqueue_bench.cc`](bench/enqueue_bench.cc), then run `./build/enqueue_bench`.
+The pool does not win a single hand-off. A future round trip (`async(f).get()`, with a worker
+that sleeps as the caller wakes) and the delay before a task starts, with one task submitted
+every microsecond into 4 workers (median), in microseconds:
+
+| | threadpool, M4 Pro | naive | asio | threadpool, i9 | naive | asio |
+|---|---|---|---|---|---|---|
+| future round trip | 6.9 | 6.1 | 6.2 | 8.8 | 8.2 | 8.2 |
+| start delay, 1 task per µs | 2.4 | 2.0 to 4.7 | 3.8 to 4.2 | 6.4 | 5.0 | 3.1 |
+
+Machines: Apple M4 Pro (arm64) and Intel Core i9-9980HK (x86_64), both on macOS with Apple
+clang 17, `-O3 -DNDEBUG`. CMake fetches Asio 1.30.2 when the system has none; pass
+`-DASIO_INCLUDE_DIR=<asio>/asio/include` to choose one.
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DTHREADPOOL_BUILD_BENCH=ON
+cmake --build build --target enqueue_bench
+./build/enqueue_bench 7 100000 shared    # the first table; also cap40, local, idle, latency, trickle
+```
+
 [ARCHITECTURE.md](ARCHITECTURE.md) explains the queue, the wake protocol and the
 trade-offs.
 
