@@ -27,7 +27,7 @@ struct Counted : WorkItem {
 };
 
 void count_one(WorkItem* w) noexcept {
-	static_cast<Counted*>(w)->count->fetch_add(1, std::memory_order_relaxed);
+	static_cast<Counted*>(w)->count->fetch_add(1, std::memory_order_release);
 }
 
 std::uint64_t cpu_ns() {
