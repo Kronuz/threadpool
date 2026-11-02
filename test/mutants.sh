@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mutation checks for the pool's queue, its tasks and TaskGroup: each mutant breaks one thing that
+# Mutation checks for WorkPool's counters: each mutant breaks one thing that
 # the tests are meant to pin, builds the test that should notice, and must fail it. A surviving
 # mutant means a missing test. Run from the repository root:
 #
@@ -46,62 +46,6 @@ PY
 	fi
 }
 
-run "a sleeper does not look at the queue again before it waits" pool_queue.h \
-	"if (_head_pos.load(std::memory_order_relaxed) != _tail_pos.load(std::memory_order_seq_cst)) {" \
-	"if (false) {" test/pool_stress.cc
-run "a producer never wakes a sleeper" pool_queue.h \
-	"if (_idle.load(std::memory_order_seq_cst) != 0) {" "if (false) {" test/pool_stress.cc
-run "the running flag is never set" pool_queue.h \
-	"claim->store(1, std::memory_order_relaxed);" "(void)claim;" test/pool_stress.cc
-run "a producer wakes every sleeper instead of one" pool_queue.h \
-	"if (k > n) {
-				k = n;
-			}" "" test/pool_stress.cc
-run "the head index restarts at 1 in the next chunk" pool_queue.h \
-	"_head_idx = 0;
-		}
-		return true;" "_head_idx = 1;
-		}
-		return true;" test/pool_stress.cc
-run "size() counts the end() sentinels" pool_queue.h \
-	"if (counted) {
-			_tasks_pushed.store" "if (true) {
-			_tasks_pushed.store" test/pool_diff.cc
-run "a stale tail cache reports an empty queue as having an item" pool_queue.h \
-	"if (pos == _tail_cache.load(std::memory_order_relaxed)) {" "if (false) {" test/pool_stress.cc
-run "SmallTask relocation leaves the source alive" small_task.h \
-	"get(src).~D();" "" test/small_task.cc
-run "a boxed SmallTask is never freed" small_task.h \
-	"static void destroy(void* p) noexcept { delete get(p); }" "static void destroy(void*) noexcept {}" test/small_task.cc
-run "async drops the exception instead of setting it" threadpool.hh \
-	"promise.set_exception(std::current_exception());" "(void)0;" test/pool_stress.cc
-run "post drops its call" threadpool.hh \
-	"std::apply(std::move(func), std::move(args));
-		});
-	}" "(void)func; (void)args;
-		});
-	}" test/pool_stress.cc
-run "a worker keeps its group's ticket whatever waits on the pool queue" task_group.hh \
-	"return pool->size() > mine || pool->finished() || pool->ending();" "(void)mine; return false;" test/task_group.cc
-run "a worker that enters a ticket does not count it off the pool queue" task_group.hh \
-	"static void dispatch(const std::shared_ptr<State>& state) {
-		state->in_pool.fetch_sub(1, std::memory_order_relaxed);" "static void dispatch(const std::shared_ptr<State>& state) {" test/task_group.cc
-run "an enqueue posts a ticket while another is on its way to a worker" task_group.hh \
-	"if (tickets == running && tickets < max_tickets && !queued.empty()) {" \
-	"if (tickets < max_tickets && !queued.empty()) {" test/task_group.cc
-run "the worker that takes a ticket does not list the next before its task" task_group.hh \
-	"task = state->take(started);
-			widen = state->list();
-		}
-		for (;;) {" "task = state->take(started);
-			widen = false;
-		}
-		for (;;) {" test/task_group.cc
-run "a ticket that retires after a burst stays counted" task_group.hh \
-	"if (state->queued.empty()) {
-					--state->tickets;
-					if (state->running == 0) {" "if (state->queued.empty()) {
-					if (state->running == 0) {" test/task_group.cc
 run "pending() counts only the query lane" work_pool.hh \
 	"std::size_t n = _s->pending();" "std::size_t n = _s->lanes[0].pending;" test/work_counts.cc
 run "running() reports the queued count" work_pool.hh \

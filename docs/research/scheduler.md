@@ -1,5 +1,7 @@
 # One scheduler for tens of thousands of indexes
 
+> Status: HISTORY (2026-11-02) the research that produced `WorkPool`. `ThreadPool`, `TaskGroup` and the `research/` harness it compares against were deleted; they are at `threadpool:0983f2d`.
+
 > Paths under `.scratch/` name local scratch files (builds, logs) that are not part of the repository.
 
 - Date: 2026-10-18. Branch `research/scheduler`.

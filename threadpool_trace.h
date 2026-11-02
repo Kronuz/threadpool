@@ -2,7 +2,7 @@
  * Default (no-op) tracing and thread-registration hooks for the standalone
  * `threadpool` library.
  *
- * `threadpool.hh` and `thread.cc` instrument themselves through two extension
+ * `work_pool.hh` and `thread.cc` instrument themselves through extension
  * points that are no-ops by default, so the library builds with zero dependency
  * on any logging or crash-reporting header:
  *
@@ -26,7 +26,7 @@
  *   1. Define THREADPOOL_TRACE_HEADER to the path of a header that defines them,
  *      e.g.
  *        c++ -DTHREADPOOL_TRACE_HEADER='"my_trace.h"' ...
- *      `threadpool.hh`/`thread.cc` will include that instead of this file.
+ *      `work_pool.hh`/`thread.cc` will include that instead of this file.
  *
  *   2. Define the macros directly before including the library headers.
  *
@@ -43,8 +43,8 @@
 
 #pragma once
 
-// Logging hook. Used to report an exception swallowed in the ThreadPool
-// destructor and in a worker's task catch-all. No-op by default.
+// Logging hook. Used to report an exception swallowed in a
+// WorkPool task or destructor. No-op by default.
 #ifndef L_EXC
 #define L_EXC(...)
 #endif

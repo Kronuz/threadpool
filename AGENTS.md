@@ -8,32 +8,23 @@ easy to fall into.
 ## Repo map
 
 ```
-threadpool.hh                 The pool: ThreadPool, ThreadPoolThread, PackagedTask, TaskWrapper, TaskQueue. Header.
-pool_queue.h                  PoolQueue: the workers' queue (chunked list, tail and head locks, sleep/wake protocol). Header.
-small_task.h                  SmallTask: the move-only 48-byte-inline void() callable a std::function<void()> task is queued as. Header.
-task_group.hh                 TaskGroup: owner-scoped cancel/wait over a pool, round-robin across groups. Header.
 work_pool.hh                  WorkPool/WorkGroup/WorkItem: the many-owner scheduler (lanes, ready rings, DRR, classes, futex idle). Header.
-thread.hh                     Thread<Impl,policy> CRTP base, ThreadPolicyType enum, thread-name free function decls. Header.
+thread.hh                     Thread<Impl,policy> CRTP base, ThreadPolicyType enum (regular, logging), thread-name free function decls. Header.
 thread.cc                     The only .cc: run_thread/setup_thread/set_thread_name/get_thread_name/sched_getcpu.
-blocking_concurrent_queue.h   Mutex + condvar queue (no longer the pool's; kept for consumers). Header.
-concurrent_queue.h            Mutex + std::deque queue, what TaskQueue uses (NOT lock-free). Header.
+blocking_concurrent_queue.h   Mutex + condvar queue (not the pool's; kept for consumers). Header.
+concurrent_queue.h            Mutex + std::deque queue under BlockingConcurrentQueue (NOT lock-free). Header.
 likely.h                      likely/unlikely macros; self-contained (no config.h).
-threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER hook (stands in for Xapiand's log.h/traceback.h).
+threadpool_trace.h            No-op L_EXC + THREADPOOL_THREAD_REGISTER/UNREGISTER hooks (stands in for Xapiand's log.h/traceback.h).
 config.h.in                   CMake template for pthread feature macros; configured into build/config.h.
-test/test.cc                  Runnable smoke test: pool of N tasks, async futures, TaskQueue.
-test/small_task.cc            SmallTask: empty states, inline vs boxed allocation, destruction exactly once, move-only and throwing-move callables.
-test/pool_diff.cc             The pool against the frozen test/threadpool_old.hh: random scripts, shutdown paths, async shapes, totals.
-test/pool_stress.cc           Stress and invariants for the queue and its wake protocol (TSan/ASan): counts, order, no lost wakeup, counted, destruction.
-test/threadpool_old.hh        The pool before PoolQueue and SmallTask, frozen in namespace threadpool_old. Never edit it.
-test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin, tickets per burst, widening.
-test/task_group_stress.cc     TaskGroup on 16 workers (TSan/ASan): bursts, many producers, FIFO, cancels, chains, teardown.
+test/thread_restart.cc        Thread<> restarts: run, join, run again; a failed run rethrown at the next run().
+test/work_counts.cc          WorkGroup::pending() and running().
 test/work_pool.cc             WorkPool tests: delivery, reposts, a child-group wait, draining, ping-pong, idle CPU.
 test/work_group.cc            WorkGroup tests: fan-out, turns, width, weight, cancel, wait, lifetime, sleep_until, classes.
 test/work_scheduling.cc       Merge aging, the caps under aging, parse-ahead beside an index, V2 child-group waits, the V5 guard.
 test/work_wait.cc             Waits: abort on a stack cycle, inversion, width, wake, resources, random acyclic graphs; on_idle.
 docs/mechanisms/work-pool.md  How WorkPool works, why, and what guards each invariant.
-bench/                        enqueue_bench.cc (trivial-task throughput against the old pool, a naive pool, asio 1.30.2 fetched at its tag; checks that every pool ran every task; idle, latency, trickle modes), kernel_time.cc (both THREADPOOL_BUILD_BENCH) and the research-harness adapter (research_ab.sh).
-CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + CTest tests `threadpool` and `task_group`.
+bench/kernel_time.cc              User and kernel time and context switches per op for WorkPool and WorkGroup (THREADPOOL_BUILD_BENCH).
+CMakeLists.txt                STATIC library target `threadpool` (+ alias threadpool::threadpool) + the CTest tests.
 LICENSE                       MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                     What it is, install, quick start.
 docs/API.md                   The API reference and the tracing hooks.
@@ -53,18 +44,16 @@ cmake -B build && cmake --build build && ctest --test-dir build
 Or directly (you must compile `thread.cc` too, it is not header-only):
 
 ```sh
-c++ -std=c++20 -I. test/test.cc thread.cc -o test/test && ./test/test
+c++ -std=c++20 -I. -Ibuild test/work_group.cc thread.cc -o test/work_group -pthread && ./test/work_group
 ```
 
-Expected output ends with `all threadpool tests passed`, exit 0. The CMake
-`threadpool` target is a `STATIC` library that requests `cxx_std_20`, links
+The CMake `threadpool` target is a `STATIC` library that requests `cxx_std_20`, links
 `Threads::Threads`, and exposes both the source dir and the generated-config dir
-as `PUBLIC` includes. The test target is `threadpool_test`; the registered CTest
-name is `threadpool`.
+as `PUBLIC` includes. Each `test/*.cc` is its own CTest test.
 
 ## Conventions
 
-- **C++20.** Required by `std::format` (worker naming in `threadpool.hh`). Don't
+- **C++20.** Required by `std::format` (worker naming in `work_pool.hh`). Don't
   drop below it.
 - **No external dependencies.** The only includes are the C++ standard library,
   pthreads, and the bundled headers. Do not add Xapiand headers (`log.h`,
@@ -73,7 +62,7 @@ name is `threadpool`.
 - **Tracing and thread registration flow through two injectable hooks**, both
   no-ops by default: `L_EXC(...)` and `THREADPOOL_THREAD_REGISTER(pthread, name)`.
   Defaults live in `threadpool_trace.h`, each `#ifndef`-guarded. Both
-  `threadpool.hh` and `thread.cc` reach them through
+  `work_pool.hh` and `thread.cc` reach them through
   `#ifdef THREADPOOL_TRACE_HEADER` (include the consumer's header) `#else`
   (include `threadpool_trace.h`). A consumer injects its own via
   `-DTHREADPOOL_TRACE_HEADER='"my_trace.h"'`, or defines the macros first. Keep
@@ -89,64 +78,18 @@ name is `threadpool`.
 ## Load-bearing invariants
 
 - **`ThreadPolicyType` and the policy template parameter must stay.** The enum
-  and the `ThreadPolicyType thread_policy` parameter on `Thread`, `ThreadPool`,
-  and `ThreadPoolThread` are kept for source-compatibility: Xapiand has 25+ call
-  sites of the form `ThreadPool<T, ThreadPolicyType::x>`. The policy is currently
-  runtime-ignored (`run_thread`/`setup_thread` take it unnamed), but deleting it
-  breaks every one of those call sites. If you wire it up to do something
-  (affinity, priority), that is a real behavior change to call out — do it inside
-  `run_thread`/`setup_thread` so call sites stay unchanged.
-- **`PackagedTask`'s copy constructor must never actually run.** It exists only
-  to satisfy `std::function`'s copyability requirement and `assert(false)`s
-  (`threadpool.hh`). The contract is that the task is moved, never copied.
-- **Worker shutdown is two-phase.** `end()` enqueues one `nullptr` per thread and
-  lets workers drain first; `finish()` sets `_finished` so workers stop as soon
-  as possible. The worker loop checks `_finished` (acquire) each iteration and
-  `_ending` only when it dequeues nothing. Keep `end`/`finish`/the worker loop in
-  sync, or shutdown either hangs or drops queued tasks.
-- **Counters are the only state queries, and a task is always counted.** `size()` is
-  the queue's truthy items pushed minus popped (each stored under its own lock, never
-  a shared RMW); `running_size()` sums one flag per worker. `PoolQueue::pop` sets the
-  worker's flag under the head lock *before* the task leaves `size()`, so an idle
-  check `size() == 0 && running_size() == 0` never fires with a task in flight. Keep
-  that order; `test/pool_stress.cc` (`test_counted`) pins it.
-- **The queue is FIFO and never fails.** One logical FIFO for every producer: a task
-  starts after the ones enqueued before it, and one worker runs a producer's tasks in
-  order. `enqueue` always returns `true`. Do not shard the tail or batch on the consumer
-  side: a task that waits for a later one would then wait on its own worker's buffer.
-- **The sleep protocol is a seq_cst pair.** A producer publishes (`_tail_pos`, seq_cst)
-  then reads `_idle` (seq_cst); a sleeper stores `_idle` (seq_cst) then reads
-  `_tail_pos` (seq_cst) before it waits. Weakening either side to acquire/release
-  loses wakeups. The workers' 100 ms timeout hides a lost wakeup as latency, so the
-  stress test builds with `THREADPOOL_QUEUE_STATS` and fails on a sleeper that times
-  out and finds a task. Do not add a spin before the sleep: it makes a future round trip
-  about 45% slower (the worker's core is not free for the waking caller).
-- **The tail lock is a spin lock, the head lock a `std::mutex`.** Producers hold the
-  tail for a few dozen nanoseconds and waiting on a `std::mutex` costs far more; many
-  consumers on a spin lock stampede it, so surplus ones must sleep. Keep allocation out
-  of what the tail lock guards but the one chunk per 64 pushes.
-- **A `TaskGroup` ticket runs its group's tasks back to back only while nothing else
-  waits on the pool queue** (`yield()`: the pool's `size()` against the group's own
-  tickets there, `finished()` and `ending()`); otherwise it requeues behind the other
-  work, which keeps groups round-robin. A group lists one ticket at a time: an enqueue
-  posts one only when every live ticket is held by a worker, and the worker that takes
-  a ticket lists the next before it runs its task, so a group of long tasks still
-  widens to `max_concurrency`. Posting a ticket per enqueue made each task of a burst
-  on 14 to 16 workers wake a worker through the queue's sleeper lock
-  (`test/task_group.cc` cases 7, 8 and 12 to 14 pin the order, the ticket count and
-  the widening).
+  (`regular`, `logging`) and the `ThreadPolicyType thread_policy` parameter on `Thread`
+  are the template parameter of the scheduler library's classes and of the logger.
+  The policy is runtime-ignored (`run_thread`/`setup_thread` take it unnamed). If you
+  wire it up to do something (affinity, priority), that is a real behavior change to
+  call out: do it inside `run_thread`/`setup_thread` so call sites stay unchanged.
 - **`ConcurrentQueue`/`BlockingConcurrentQueue` are mutex-backed, not lock-free.**
   `ConcurrentQueue` is a `std::deque` under a `std::mutex`; `BlockingConcurrentQueue`
-  adds a condvar. `TaskQueue` uses them; the pool does not. Do not assume lock-free
-  semantics anywhere.
-- **`SmallTask` is the queued form of `std::function<void()>`.** It must keep accepting
-  what `std::function<void()>` accepts, including an empty one and a null function
-  pointer (an empty task, which `end()`/`finish()` queue as a sentinel), and it only
-  needs a move. A callable it stores inline must have a `noexcept` move, or the queue's
-  relocation could throw.
+  adds a condvar. The pool does not use them; Xapiand's WAL writer does. Do not assume
+  lock-free semantics anywhere.
 
-- **`WorkPool` is separate from `ThreadPool`.** It shares only `Thread` and the trace
-  hooks. Its invariants: every ring entry is one listed ticket of one lane; a lane with
+- **`WorkPool` is the only pool.** The `ThreadPool` family is gone; consumers migrated to
+  `WorkPool` and `WorkGroup`. It builds on `Thread` and the trace hooks. Its invariants: every ring entry is one listed ticket of one lane; a lane with
   queued work holds at least one ticket; extra tickets per class never exceed the worker
   count (that bounds the ring); a group's state is freed only by whoever drops its last
   ticket or helper; every post that pushes a ring entry does so with a seq_cst CAS before
@@ -161,8 +104,6 @@ name is `threadpool`.
 
 ## How to extend
 
-- **Add a pool state query / control.** Follow the existing atomic-counter
-  pattern; read with relaxed loads, never take a lock for a query.
 - **Wire up a thread policy.** Read `thread_policy` inside `run_thread` /
   `setup_thread` (`thread.cc`) — e.g. set affinity or priority per policy. Call
   sites and the template signatures stay exactly as they are.
@@ -171,25 +112,19 @@ name is `threadpool`.
   `THREADPOOL_THREAD_REGISTER`, or define them before including the headers. To
   recover Xapiand's behavior, map `THREADPOOL_THREAD_REGISTER` to
   `init_thread_info` and `L_EXC` to `log.h`'s macro.
-- **Always extend the tests.** `test/test.cc` covers the pool, `test/task_group.cc`
-  covers `TaskGroup`, `test/pool_diff.cc` compares the pool with its frozen
-  predecessor and `test/pool_stress.cc` stresses the queue under TSan/ASan. Any
-  behavioral change should grow a corresponding assertion there. TSan on the Linux VM
-  needs clang and `setarch x86_64 -R`.
+- **Always extend the tests.** The `test/work_*.cc` files cover `WorkPool` and
+  `WorkGroup`, and `test/mutants.sh` pins the counters with mutants. Any behavioral
+  change should grow a corresponding assertion there. TSan on the Linux VM needs clang
+  and `setarch x86_64 -R`.
 
 ## Traps
 
 - **Don't delete `ThreadPolicyType`** thinking it is dead. It is unused at
-  runtime but load-bearing at compile time for the consumer's call sites.
+  runtime but load-bearing at compile time for the scheduler and logger libraries.
 - **Don't reintroduce `config.h` into `likely.h`.** It is self-contained on
   purpose so the headers work without the CMake-generated config.
 - **Don't add Xapiand headers back.** `log.h`, `strings.hh`, `traceback.h` were
   the whole point of the extraction. Route through the hooks and `std::format`.
-- **`TaskQueue::clear()` uses `ConcurrentQueueDefaultTraits::block_size`.** The
-  Xapiand original referenced `Queue::BLOCK_SIZE`, which this `ConcurrentQueue`
-  does not define; it compiled only because `clear()` was never instantiated. The
-  fix here points at the trait that actually defines it. If you re-sync from
-  Xapiand, keep this fix.
 - **Compile `thread.cc`.** It is the one translation unit; forgetting it gives
   link errors for `set_thread_name`/`run_thread`/`sched_getcpu`.
 - **`sched_getcpu` is macOS-only here.** On Linux glibc already provides it; the
@@ -203,11 +138,6 @@ This is a standalone extraction from
 [Xapiand](https://github.com/Kronuz/Xapiand). The delta from the original is pure
 decoupling:
 
-- `threadpool.hh` dropped `#include "log.h"` and `#include "strings.hh"`. The two
-  `L_EXC(...)` sites now resolve through `threadpool_trace.h` (no-op by default),
-  and `strings::format(pool->_format, idx)` became
-  `std::vformat(pool->_format, std::make_format_args(idx))` (the format strings
-  like `"CH{:02}"` are already `std::format` syntax).
 - `thread.cc` dropped `#include "traceback.h"`; the `init_thread_info(...)` call
   became `THREADPOOL_THREAD_REGISTER(...)` (no-op by default). The hardcoded
   `"Xapiand:"` name prefix became the `THREADPOOL_THREAD_NAME_PREFIX` macro
@@ -216,8 +146,6 @@ decoupling:
   directly; `config.h` is now CMake-generated and carries only the pthread
   thread-naming feature macros that `thread.cc` needs.
 
-Since the extraction the pool has its own queue (`PoolQueue`) and queued task type
-(`SmallTask`), with the same API and behavior (`CHANGELOG.md`). Keep extraction
-hygiene separate from behavior changes so they can be reconciled with upstream. To restore Xapiand's
+Keep extraction hygiene separate from behavior changes. To restore Xapiand's
 tracing/registration without editing these files, see "Tracing and thread
 registration" in [docs/API.md](docs/API.md).

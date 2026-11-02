@@ -67,19 +67,9 @@ add_library(threadpool::threadpool ALIAS threadpool)
 # (e.g. via FetchContent) don't build our tests.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   enable_testing()
-  add_executable(threadpool_test test/test.cc)
-  target_link_libraries(threadpool_test PRIVATE threadpool)
-  add_test(NAME threadpool COMMAND threadpool_test)
   add_executable(thread_restart_test test/thread_restart.cc)
   target_link_libraries(thread_restart_test PRIVATE threadpool)
   add_test(NAME thread_restart COMMAND thread_restart_test)
-
-  add_executable(task_group_test test/task_group.cc)
-  target_link_libraries(task_group_test PRIVATE threadpool)
-  add_test(NAME task_group COMMAND task_group_test)
-  add_executable(task_group_stress_test test/task_group_stress.cc)
-  target_link_libraries(task_group_stress_test PRIVATE threadpool)
-  add_test(NAME task_group_stress COMMAND task_group_stress_test)
 
   add_executable(work_pool_test test/work_pool.cc)
   target_link_libraries(work_pool_test PRIVATE threadpool)
@@ -101,54 +91,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(work_wait_test PRIVATE threadpool)
   add_test(NAME work_wait COMMAND work_wait_test)
 
-  # The pool's queue and tasks: SmallTask, the old pool as an oracle, stress for TSan/ASan.
-  add_executable(small_task_test test/small_task.cc)
-  target_link_libraries(small_task_test PRIVATE threadpool)
-  add_test(NAME small_task COMMAND small_task_test)
-
-  add_executable(pool_diff_test test/pool_diff.cc)
-  target_link_libraries(pool_diff_test PRIVATE threadpool)
-  target_include_directories(pool_diff_test PRIVATE test)
-  add_test(NAME pool_diff COMMAND pool_diff_test)
-
-  add_executable(pool_stress_test test/pool_stress.cc)
-  target_link_libraries(pool_stress_test PRIVATE threadpool)
-  add_test(NAME pool_stress COMMAND pool_stress_test)
-
   # Benchmarks (not tests): -DTHREADPOOL_BUILD_BENCH=ON builds them; see bench/.
   option(THREADPOOL_BUILD_BENCH "Build the benchmarks" OFF)
   if(THREADPOOL_BUILD_BENCH)
     add_executable(kernel_time bench/kernel_time.cc)
     target_link_libraries(kernel_time PRIVATE threadpool)
-
-    # enqueue_bench compares ThreadPool with the frozen pre-change pool, a mutex + condition
-    # variable pool and standalone asio. asio is the pinned release below, fetched here and never
-    # by the library; -DASIO_INCLUDE_DIR=<asio>/asio/include uses another checkout instead.
-    add_executable(enqueue_bench bench/enqueue_bench.cc)
-    target_link_libraries(enqueue_bench PRIVATE threadpool)
-    target_include_directories(enqueue_bench PRIVATE test)
-    if(ASIO_INCLUDE_DIR)
-      set(THREADPOOL_ASIO_INCLUDE "${ASIO_INCLUDE_DIR}")
-    else()
-      include(FetchContent)
-      FetchContent_Declare(asio GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git GIT_TAG asio-1-30-2)
-      FetchContent_GetProperties(asio)
-      if(NOT asio_POPULATED)
-        FetchContent_Populate(asio)
-      endif()
-      set(THREADPOOL_ASIO_INCLUDE "${asio_SOURCE_DIR}/asio/include")
-    endif()
-    target_include_directories(enqueue_bench SYSTEM PRIVATE "${THREADPOOL_ASIO_INCLUDE}")
-    target_compile_definitions(enqueue_bench PRIVATE ASIO_STANDALONE)
   endif()
 
   # A runnable tour of the library (not a test): build & run ./build/threadpool_demo
   add_executable(threadpool_demo examples/demo.cc)
   target_link_libraries(threadpool_demo PRIVATE threadpool)
-
-  # Scheduler research prototypes (docs/research/scheduler.md); off by default.
-  option(THREADPOOL_BUILD_RESEARCH "Build the scheduler research prototypes and benchmarks" OFF)
-  if(THREADPOOL_BUILD_RESEARCH)
-    add_subdirectory(research)
-  endif()
 endif()

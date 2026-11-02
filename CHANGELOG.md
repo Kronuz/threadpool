@@ -8,6 +8,29 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
 
 ## 2026-11-02
 
+### Removed
+
+- The `ThreadPool` family, with no alias: `threadpool.hh` (`ThreadPool`, `ThreadPoolThread`,
+  `PackagedTask`, `TaskWrapper`, `TaskQueue`), `task_group.hh` (`TaskGroup`,
+  `TaskGroupStopToken`), `pool_queue.h` and `small_task.h`. `WorkPool` and `WorkGroup` are
+  the pool: a group replaces a `TaskGroup` (`enqueue`, `wait`, `cancel_and_wait`,
+  `stop_requested`), and `WorkGroup::pending()` and `running()` replace the pool's `size()`
+  and `running_size()`. Their tests (`test/test.cc`, `task_group*.cc`, `pool_diff.cc`,
+  `pool_stress.cc`, `small_task.cc`, the frozen `test/threadpool_old.hh`), the
+  `enqueue_bench` and the `research/` harness go with them; the last commit that has them
+  is `threadpool:0983f2d`. The scheduler library, the logger and Xapiand run on `WorkPool`.
+- `ThreadPolicyType::wal_writer`, `replication`, `doc_matchers`, `doc_preparers`,
+  `doc_indexers`, `committers`, `fsynchers`, `updaters`, `http_servers`, `binary_servers`,
+  `http_clients` and `binary_clients`: no one selects on them (the policy is ignored at run
+  time). `regular` and `logging` remain, as the template parameter of `Thread` and of the
+  scheduler library.
+
+### Changed
+
+- `examples/demo.cc` and `bench/kernel_time.cc` run on `WorkPool`; the README, the API
+  reference, `ARCHITECTURE.md` and `AGENTS.md` describe it alone. `docs/perf/enqueue.md`,
+  `docs/perf/trickle/p99.md` and `docs/research/scheduler.md` are marked HISTORY.
+
 ### Added
 
 - `WorkGroup::pending()` and `WorkGroup::running()`: the items queued and not started, and

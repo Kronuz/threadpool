@@ -1,9 +1,9 @@
-// User, kernel time, and switches per op, today's pool (bare, TaskGroup) against WorkPool
-// (bare, WorkGroup), interleaved: a spun-on handoff, a burst of tiny items, an idle pool,
-// and a 1 ms timed sleep (condvar wait_until against WorkPool::sleep_until).
+// User, kernel time, and switches per op, WorkPool (bare, WorkGroup), interleaved: a spun-on
+// handoff, a burst of tiny items, an idle pool, and a 1 ms timed sleep (condvar wait_until
+// against WorkPool::sleep_until).
 // Built with -DTHREADPOOL_BUILD_BENCH=ON; run as kernel_time [trials] [threads] [rows], where
 // threads defaults to the hardware's and rows picks some of handoff,burst,idle,sleep (all by
-// default). The TaskGroup burst on many workers: kernel_time 5 16 burst (and 5 4 burst).
+// default). The WorkGroup burst on many workers: kernel_time 5 16 burst (and 5 4 burst).
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,8 +19,6 @@
 
 #include <sys/resource.h>
 
-#include "task_group.hh"
-#include "threadpool.hh"
 #include "work_pool.hh"
 
 using namespace std::chrono_literals;
@@ -116,35 +114,6 @@ int main(int argc, char** argv) {
 
 	for (unsigned trial = 0; trial < trials; ++trial) {
 		{
-			ThreadPool<> pool("T{:02}", threads);
-			std::this_thread::sleep_for(50ms);
-			if (want("handoff")) {
-				handoff("today", rounds, [&](std::atomic<std::uint32_t>& d) { pool.enqueue([&d] { d.fetch_add(1, std::memory_order_release); }); });
-			}
-			if (want("burst")) {
-				burst("today", items, [&](std::atomic<std::uint64_t>& d) { pool.enqueue([&d] { d.fetch_add(1, std::memory_order_release); }); }, spin_drain);
-			}
-			if (want("idle")) {
-				idle("today", 2.0);
-			}
-			pool.finish();
-			pool.join();
-		}
-		{
-			ThreadPool<> pool("G{:02}", threads);
-			TaskGroup group(pool);
-			std::this_thread::sleep_for(50ms);
-			if (want("handoff")) {
-				handoff("today-tg", rounds, [&](std::atomic<std::uint32_t>& d) { group.enqueue([&d] { d.fetch_add(1, std::memory_order_release); }); });
-			}
-			if (want("burst")) {
-				burst("today-tg", items, [&](std::atomic<std::uint64_t>& d) { group.enqueue([&d] { d.fetch_add(1, std::memory_order_release); }); }, spin_drain);
-			}
-			if (want("idle")) {
-				idle("today-tg", 2.0);
-			}
-		}
-		{
 			WorkPool pool({.threads = threads});
 			std::this_thread::sleep_for(50ms);
 			Spin s;
@@ -183,8 +152,8 @@ int main(int argc, char** argv) {
 		if (!want("sleep")) {
 			continue;
 		}
-		// The timed sleep a merge's rate limiter takes: today's pool_executor::sleep_until is
-		// a condvar wait_until; WorkPool::sleep_until is one timed futex wait.
+		// The timed sleep a merge's rate limiter takes: a condvar wait_until against
+		// WorkPool::sleep_until, one timed futex wait.
 		{
 			std::mutex mu;
 			std::condition_variable cv;

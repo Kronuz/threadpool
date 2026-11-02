@@ -34,19 +34,7 @@ using namespace std::chrono_literals;
 
 enum class ThreadPolicyType {
 	regular,
-	wal_writer,
 	logging,
-	replication,
-	doc_matchers,
-	doc_preparers,
-	doc_indexers,
-	committers,
-	fsynchers,
-	updaters,
-	http_servers,
-	binary_servers,
-	http_clients,
-	binary_clients,
 };
 
 

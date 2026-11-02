@@ -1,73 +1,5 @@
 # threadpool API reference
 
-## `ThreadPool<TaskType = std::function<void()>, ThreadPolicyType policy = regular>`
-
-- `ThreadPool(const char* format, size_t num_threads, size_t queue_size = 1000)`
-  — starts `num_threads` workers immediately; `format` is a `std::format` string
-  rendered with the worker index to name each thread (e.g. `"CH{:02}"`).
-- `enqueue(Func&&)` / `enqueue_bulk(It first, size_t count)` — push work; the queue
-  is unbounded, so both return `true`. A callable of up to 48 bytes is stored in the
-  queue slot with no allocation; a larger one costs one. It need not be copyable.
-  `enqueue_bulk` pushes under one lock and wakes up to `count` sleeping workers.
-- `post(Func&&, Args&&...)` — queue `func(args...)` with no future (the arguments are
-  copied or moved in, as for `async`); returns `true`. What a worker throws is logged
-  through `L_EXC`. Use it where `async`'s future would be discarded: it skips the
-  future's shared state.
-- `async(Func&&, Args&&...) -> std::future<R>` — queue a call and get its
-  future; the future's shared state is the only allocation a small call needs. It
-  carries the value, or the exception the call threw; a task dropped before it runs
-  (`clear()`, a destroyed pool) leaves `std::future_errc::broken_promise`. Throws
-  `std::runtime_error` if it can't enqueue.
-- `package(Func&&, Args&&...) -> PackagedTask<...>` — build the packaged task
-  without enqueuing (the building block `async` uses).
-- `end()` — stop once the queue drains. `finish()` — stop as soon as possible.
-- `join(timeout = 60s) -> bool` — wait for workers; `false` on timeout.
-- `clear()` — drop queued (not-yet-running) tasks.
-- `size()`, `running_size()`, `threadpool_size()`, `threadpool_capacity()`,
-  `threadpool_workers()`, `finished()`, `ending()` — lock-free state queries.
-
-## `TaskGroup<Pool = ThreadPool<>>` (`task_group.hh`)
-
-An owner-scoped set of tasks on a shared `ThreadPool<std::function<void()>>`.
-The pool's own behavior is unchanged; the group layers on top of `enqueue`.
-
-```cpp
-#include "task_group.hh"
-
-ThreadPool<> pool("W{:02}", 4);
-{
-	TaskGroup group(pool);
-	group.enqueue([] { step(); });
-	group.enqueue([](const TaskGroupStopToken& stop) {
-		while (!stop.stop_requested() && more()) { chunk(); }
-	});
-	group.wait();
-}  // the destructor closes, cancels, and waits
-```
-
-- `TaskGroup(Pool& pool, size_t max_concurrency = 0)` — `max_concurrency` caps
-  how many of the group's tasks run at once (`0` means the pool's thread count).
-- `enqueue(Func&&) -> bool` — queue `func()` or `func(const TaskGroupStopToken&)`;
-  `false` (and the callable is destroyed) once the group is closed. A task may
-  enqueue to its own group.
-- `cancel() -> size_t` — drop the queued tasks that have not started (they never
-  run; their destructors run on the calling thread), request stop for the running
-  ones, and return how many were dropped. Tasks enqueued afterwards run normally.
-- `wait()` — block until the group has no queued and no running tasks.
-- `cancel_and_wait() -> size_t` — both.
-- `close()` / `closed()` — reject further enqueues; queued tasks still run.
-- `~TaskGroup()` — `close()`, then `cancel_and_wait()`.
-- `TaskGroupStopToken::stop_requested()` — a relaxed atomic load; turns true once
-  the group cancels after the task started. Valid only during the task's call.
-
-Groups are served round-robin and each group is FIFO: one group with a thousand
-queued tasks delays another group's task by at most `max_concurrency` pool tasks.
-Every member is callable from any thread, but the destructor must not race other
-callers (the group's own running tasks may keep calling it while it waits).
-`wait()`, `cancel_and_wait()`, and the destructor deadlock if called from one of
-the group's own tasks, and `wait()` needs live pool workers. The pool must outlive
-the group, and `pool.clear()` would strand a group's queued tasks.
-
 ## `WorkPool`, `WorkGroup`, `WorkItem` (`work_pool.hh`)
 
 One pool shared by many owners, each a `WorkGroup`. Items are caller-owned, so posting
@@ -214,26 +146,17 @@ give `Foo` a `const std::string& name()` and an `operator()`. Then:
 
 ## `ThreadPolicyType`
 
-An enum of policy tags (`regular`, `wal_writer`, `logging`, `replication`,
-`doc_matchers`, `doc_preparers`, `doc_indexers`, `committers`, `fsynchers`,
-`updaters`, `http_servers`, `binary_servers`, `http_clients`, `binary_clients`).
-Carried as a template parameter; runtime-ignored today (see above).
-
-## `TaskQueue<std::packaged_task<R(Args...)>>`
-
-- `enqueue(task) -> std::future<R>` — queue a packaged task, get its future.
-- `call(Args&&...) -> bool` — dequeue and run one task with `args`; `false` if
-  empty.
-- `clear() -> size_t` — drop all queued tasks, returns how many.
+An enum of policy tags (`regular`, `logging`), carried as the template parameter of
+`Thread` and of the scheduler library's classes; ignored at run time.
 
 ## Tracing and thread registration
 
-`threadpool.hh` and `thread.cc` instrument themselves through two hooks that are
+`work_pool.hh` and `thread.cc` instrument themselves through hooks that are
 no-ops by default, so the library builds with zero dependency on any logging or
 crash-reporting header:
 
-- `L_EXC(...)` — logs an exception swallowed in the pool destructor and in a
-  worker's task catch-all (two sites). No-op by default.
+- `L_EXC(...)` — logs an exception swallowed in a worker's join and in a task's
+  catch-all (two sites). No-op by default.
 - `THREADPOOL_THREAD_REGISTER(pthread, name)` — called right after a thread is
   named, so an external crash handler can dump per-thread callstacks. No-op by
   default; this is the seam where Xapiand's `init_thread_info` plugs back in.
