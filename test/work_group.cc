@@ -73,11 +73,15 @@ int main() {
 				a_done.fetch_add(1);
 			});
 		}
+		// Counts only the items a finished after b arrived: under a slow enqueue (TSan) the worker
+		// may already be deep into a's backlog when b's item is queued.
+		const int at_arrival = a_done.load();
 		b.enqueue([&] { a_seen = a_done.load(); });
 		b.wait();
 		a.wait();
-		assert(a_seen.load() >= 0 && a_seen.load() <= 10);
-		std::printf("work_group OK: a late group ran after %d of the busy group's 200 items\n", a_seen.load());
+		const int waited = a_seen.load() - at_arrival;
+		assert(a_seen.load() >= 0 && waited >= 0 && waited <= 10);
+		std::printf("work_group OK: a late group waited %d of the busy group's items\n", waited);
 	}
 
 	// ---- 3. Width caps how many of a group's items run at once. ----
