@@ -96,11 +96,18 @@ public:
 //
 // A consumer with nothing to take sleeps on a condition variable. A producer wakes a sleeper only
 // when one is registered and not yet signaled, so a flood of tasks that keeps the workers busy
-// does not signal at all. Consumers do not spin before they sleep: a future round trip, where the
-// worker sleeps as the caller wakes, is faster when the worker's core is free for the caller.
+// does not signal at all. While items find sleepers less than THREADPOOL_SPIN_NS apart, one consumer
+// at a time polls the queue that long before it sleeps and takes the next item without a signal
+// (spin()); a pool fed less often sleeps at once, as a future round trip wants.
+#ifndef THREADPOOL_SPIN_NS
+#  define THREADPOOL_SPIN_NS 3000
+#endif
+
 template <typename T, std::size_t ChunkSlots = 64>
 class PoolQueue {
 	static_assert(std::is_nothrow_move_constructible_v<T>, "PoolQueue holds nothrow-movable items");
+	// How long a consumer polls an empty queue before it sleeps, while items come that often.
+	static constexpr long long spin_ns = THREADPOOL_SPIN_NS;
 	static constexpr std::size_t line = 128;  // false-sharing granule: Apple Silicon's cache line, two Intel lines
 
 	struct Chunk {
@@ -130,6 +137,9 @@ class PoolQueue {
 
 	// Sleepers: the count a producer reads, and the lock-protected state behind it.
 	alignas(line) std::atomic<std::size_t> _idle{0};  // sleepers nobody has signaled; stored under _pm
+	std::atomic<unsigned> _spinning{0};  // a consumer polls the queue before it sleeps (at most one)
+	std::atomic<unsigned> _hot{0};       // items reach sleepers less than spin_ns apart: polling pays
+	std::atomic<long long> _last_wake{0};  // when a producer last found a sleeper (steady_clock ns)
 	alignas(line) std::mutex _pm;
 	std::condition_variable _cv;
 	std::size_t _waiting = 0;   // consumers in _cv.wait
@@ -165,12 +175,63 @@ class PoolQueue {
 		}
 	}
 
-	// After a publish: wakes up to n sleepers.
+	// After a publish: wakes up to n sleepers, unless a consumer is polling the queue: it takes the
+	// item, and wakes sleepers for whatever else it finds (spin()).
 	void wake(std::size_t n) {
 		if (_idle.load(std::memory_order_seq_cst) != 0) {
+			if (spin_ns > 0) {
+				// Items that find sleepers less than spin_ns apart make the queue hot. The one item a
+				// poller is waiting for needs no signal: it takes it. A second one does.
+				const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count();
+				_hot.store(now - _last_wake.exchange(now, std::memory_order_relaxed) < spin_ns, std::memory_order_relaxed);
+				if (n == 1 && _spinning.load(std::memory_order_seq_cst) != 0 &&
+					_tail_pos.load(std::memory_order_relaxed) - _head_pos.load(std::memory_order_relaxed) <= 1) {
+					return;
+				}
+			}
 			wake_slow(n);
 		}
 	}
+
+	// Polls the queue for up to spin_ns before the caller sleeps, while the queue is hot (items found
+	// sleepers less than spin_ns apart): a trickle of tasks a microsecond or two apart is then served
+	// without a sleep and a wake per task, whose cost (and on a laptop core, the exit from a deep
+	// idle state) is larger than the poll. One consumer polls at a time, and the item it waits for
+	// is pushed without a signal. A poll that finds nothing cools the queue. Returns false, with the
+	// queue's sleep protocol still ahead, when nothing came.
+	bool spin(T& out, std::atomic<std::size_t>* claim) {
+		if (spin_ns <= 0 || !_hot.load(std::memory_order_relaxed) || _spinning.load(std::memory_order_relaxed) ||
+			_spinning.exchange(1, std::memory_order_seq_cst)) {
+			return false;
+		}
+		const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(spin_ns);
+		bool found = false;
+		for (unsigned n = 1; !found; ++n) {
+			found = _head_pos.load(std::memory_order_relaxed) != _tail_pos.load(std::memory_order_acquire);
+			if (found || (n % 8 == 0 && std::chrono::steady_clock::now() >= until)) {
+				break;
+			}
+			// A few relaxes between looks, so the line producers write is not read in a tight loop.
+			for (int k = 0; k < 4; ++k) {
+				pool_relax();
+			}
+		}
+		if (!found) {
+			_hot.store(0, std::memory_order_relaxed);
+		}
+		// seq_cst: a producer that read _spinning as 1 skipped its signal; its item precedes this
+		// store, so the reads below see it and its sleepers are woken here.
+		_spinning.store(0, std::memory_order_seq_cst);
+		const bool got = try_pop(out, claim);
+		const auto head = _head_pos.load(std::memory_order_relaxed);
+		const auto tail = _tail_pos.load(std::memory_order_seq_cst);
+		if (head != tail && _idle.load(std::memory_order_seq_cst) != 0) {
+			wake_slow(tail - head);
+		}
+		return got;
+	}
+
 
 	// Under _tl.
 	template <typename U>
@@ -283,7 +344,7 @@ public:
 
 	// Takes the oldest item into out, waiting up to timeout for one; false on a timeout.
 	bool pop(T& out, std::chrono::steady_clock::duration timeout, std::atomic<std::size_t>* claim = nullptr) {
-		if (try_pop(out, claim)) {
+		if (try_pop(out, claim) || spin(out, claim)) {
 			return true;
 		}
 		const auto deadline = std::chrono::steady_clock::now() + timeout;

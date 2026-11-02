@@ -74,9 +74,22 @@ the tail lock) minus the ones popped (stored under the head lock); a sentinel
 flag, the worker's own line in the pool: the head lock sets it before the popped count
 is released, so a task is always counted in `size()` or in `running_size()`.
 
-Consumers do not spin before they sleep. A future round trip (`async(f).get()`)
-sleeps the worker as it wakes the caller; a worker that spins instead keeps its core
-from the caller, and the round trip was 45% slower on an M1 Pro.
+**Polling before sleeping.** While tasks arrive a few microseconds apart, a sleep and
+a wake per task cost more than waiting for the next one, and on a laptop core the wake
+can take tens of microseconds to come out of a deep idle state. So a consumer that
+finds the queue empty polls it for up to `spin_ns` (`THREADPOOL_SPIN_NS`, 10 us) before
+it registers as a sleeper, but only while the queue is *hot*, that is, while the last
+sleeper was signaled within `spin_ns` of going to sleep, and only one consumer at a
+time (`_spinning`). A poll that finds nothing cools the queue, so a pool fed less often
+than every `spin_ns` sleeps as before, and an idle pool never polls. The poller yields
+between polls, so a thread it woke (the caller of `async(f).get()`) is not kept off its
+core: an unconditional spin made that round trip 45% slower on an M1 Pro.
+
+While a consumer polls, producers do not signal: a producer reads `_spinning` (seq_cst)
+after its publish, and the poller clears it (seq_cst) before it looks at the queue the
+last time, so the poller sees every item whose signal was skipped, takes one, and wakes
+a sleeper for each one left. A poller that gives up goes on to register as a sleeper,
+whose own last look covers the rest.
 
 `ConcurrentQueue` and `BlockingConcurrentQueue` (`concurrent_queue.h`,
 `blocking_concurrent_queue.h`) remain, with their API, for `TaskQueue` and for

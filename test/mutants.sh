@@ -50,7 +50,9 @@ run "a sleeper does not look at the queue again before it waits" pool_queue.h \
 	"if (_head_pos.load(std::memory_order_relaxed) != _tail_pos.load(std::memory_order_seq_cst)) {" \
 	"if (false) {" test/pool_stress.cc
 run "a producer never wakes a sleeper" pool_queue.h \
-	"if (_idle.load(std::memory_order_seq_cst) != 0) {" "if (false) {" test/pool_stress.cc
+	"	void wake(std::size_t n) {
+		if (_idle.load(std::memory_order_seq_cst) != 0) {" "	void wake(std::size_t n) {
+		if (false) {" test/pool_stress.cc
 run "the running flag is never set" pool_queue.h \
 	"claim->store(1, std::memory_order_relaxed);" "(void)claim;" test/pool_stress.cc
 run "a producer wakes every sleeper instead of one" pool_queue.h \
@@ -81,6 +83,12 @@ run "post drops its call" threadpool.hh \
 	}" "(void)func; (void)args;
 		});
 	}" test/pool_stress.cc
+run "no consumer polls before it sleeps" pool_queue.h \
+	"if (try_pop(out, claim) || spin(out, claim)) {" "if (try_pop(out, claim)) {" test/pool_spin.cc
+run "a poller that gives up stays marked as polling" pool_queue.h \
+	"_spinning.store(0, std::memory_order_seq_cst);
+		const bool got" "if (found) _spinning.store(0, std::memory_order_seq_cst);
+		const bool got" test/pool_spin.cc
 run "a worker keeps its group's ticket whatever waits on the pool queue" task_group.hh \
 	"return pool->size() > mine || pool->finished() || pool->ending();" "(void)mine; return false;" test/task_group.cc
 run "a worker that enters a ticket does not count it off the pool queue" task_group.hh \

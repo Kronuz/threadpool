@@ -24,6 +24,7 @@ test/test.cc                  Runnable smoke test: pool of N tasks, async future
 test/small_task.cc            SmallTask: empty states, inline vs boxed allocation, destruction exactly once, move-only and throwing-move callables.
 test/pool_diff.cc             The pool against the frozen test/threadpool_old.hh: random scripts, shutdown paths, async shapes, totals.
 test/pool_stress.cc           Stress and invariants for the queue and its wake protocol (TSan/ASan): counts, order, no lost wakeup, counted, destruction.
+test/pool_spin.cc             The polling consumer: a trickle served without a wakeup per task, signals skipped during a poll not lost.
 test/threadpool_old.hh        The pool before PoolQueue and SmallTask, frozen in namespace threadpool_old. Never edit it.
 test/task_group.cc            TaskGroup tests: cancel, wait, destructor, stop token, round-robin, tickets per burst, widening.
 test/task_group_stress.cc     TaskGroup on 16 workers (TSan/ASan): bursts, many producers, FIFO, cancels, chains, teardown.
@@ -115,11 +116,15 @@ name is `threadpool`.
   order. `enqueue` always returns `true`. Do not shard the tail or batch on the consumer
   side: a task that waits for a later one would then wait on its own worker's buffer.
 - **The sleep protocol is a seq_cst pair.** A producer publishes (`_tail_pos`, seq_cst)
-  then reads `_idle` (seq_cst); a sleeper stores `_idle` (seq_cst) then reads
-  `_tail_pos` (seq_cst) before it waits. Weakening either side to acquire/release
+  then reads `_idle` and `_spinning` (seq_cst); a sleeper stores `_idle` (seq_cst) then
+  reads `_tail_pos` (seq_cst) before it waits. Weakening either side to acquire/release
   loses wakeups. The workers' 100 ms timeout hides a lost wakeup as latency, so the
   stress test builds with `THREADPOOL_QUEUE_STATS` and fails on a sleeper that times
-  out and finds a task. Do not add a spin before the sleep: it makes a future round trip
+  out and finds a task. A producer skips its signal while one consumer polls
+  (`spin()`): the poller clears `_spinning` (seq_cst) before its last look and wakes a
+  sleeper per item it leaves, so a skipped signal is never lost (`test/pool_spin.cc`).
+  The poll runs only while the queue is hot (a sleeper was woken within `spin_ns`) and
+  yields between looks: an unconditional spin before the sleep made a future round trip
   about 45% slower (the worker's core is not free for the waking caller).
 - **The tail lock is a spin lock, the head lock a `std::mutex`.** Producers hold the
   tail for a few dozen nanoseconds and waiting on a `std::mutex` costs far more; many

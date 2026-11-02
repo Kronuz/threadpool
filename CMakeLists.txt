@@ -110,6 +110,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(pool_stress_test test/pool_stress.cc)
   target_link_libraries(pool_stress_test PRIVATE threadpool)
   add_test(NAME pool_stress COMMAND pool_stress_test)
+  add_executable(pool_spin_test test/pool_spin.cc)
+  target_link_libraries(pool_spin_test PRIVATE threadpool)
+  add_test(NAME pool_spin COMMAND pool_spin_test)
 
   # Benchmarks (not tests): -DTHREADPOOL_BUILD_BENCH=ON builds them; see bench/.
   option(THREADPOOL_BUILD_BENCH "Build the benchmarks" OFF)
