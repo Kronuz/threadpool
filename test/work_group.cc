@@ -321,17 +321,22 @@ int main() {
 		std::atomic<unsigned> now{0};
 		std::atomic<unsigned> peak{0};
 		std::atomic<unsigned> beside{0};
+		std::atomic<bool> seen{false};
 		for (int i = 0; i < 12; ++i) {
 			flushes.enqueue([&] {
 				auto n = now.fetch_add(1) + 1;
 				for (auto p = peak.load(); n > p && !peak.compare_exchange_weak(p, n);) {
 				}
-				burn(20ms);
+				// Hold the worker until the query has looked (a slow host may run it late).
+				const auto end = std::chrono::steady_clock::now() + 5s;
+				while (!seen.load() && std::chrono::steady_clock::now() < end) {
+					std::this_thread::yield();
+				}
 				now.fetch_sub(1);
 			});
 		}
 		spin_until([&] { return now.load() == 3; });
-		queries.enqueue([&] { beside = now.load(); }, WorkClass::query);
+		queries.enqueue([&] { beside = now.load(); seen = true; }, WorkClass::query);
 		queries.wait();
 		flushes.wait();
 		assert(peak.load() == 3);
