@@ -69,7 +69,11 @@ is bimodal in both builds (below).
   at 2.0 against 7.4 us. On the M4 Pro the same row is 3.2x better than START (15 against
   49 us). It is the 2026-10-31 wake protocol, which wakes a worker only when one sleeps
   unsignaled and never spins before sleeping; a spin would buy the tail back with CPU and
-  a slower future round trip (45% slower when it was tried), so the trade stays.
+  a slower future round trip (45% slower when it was tried), so the trade stays. A
+  consumer that polls only while items arrive under 3 us apart (branch `perf/trickle-p99`)
+  halves the median (6.6 to 3.0 us) and keeps the CPU at 2.1 us, but its p99 is 55 to 75
+  us against START's 35 to 46, and it slows the 4-producer, 1-worker enqueue row to 0.6x;
+  [issue #3](https://github.com/Kronuz/threadpool/issues/3) has the numbers and next steps.
 - The bare `ThreadPool` burst on 14 to 16 workers of a fresh pool is bimodal on both
   machines, at 2026-10-31 and now alike: on the i9 11 of 35 runs (7 of 20 at 2026-10-31,
   4 of 15 now) took 2.7 to 5.3 us per task, as the workers outran the producer and it
