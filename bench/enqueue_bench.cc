@@ -341,6 +341,7 @@ void trickle(const char* name, long n, double gap_ns, Submit&& submit) {
 	std::vector<double> starts(static_cast<std::size_t>(n), 0.0);
 	std::atomic<long> done{0};
 	std::vector<double> submitted(static_cast<std::size_t>(n), 0.0);
+	std::vector<double> dues(static_cast<std::size_t>(n), 0.0);
 	const double c0 = cpu_seconds();
 	const double t0 = now_s();
 	for (long i = 0; i < n; i++) {
@@ -348,6 +349,7 @@ void trickle(const char* name, long n, double gap_ns, Submit&& submit) {
 		while (now_s() < due) {
 		}
 		submitted[static_cast<std::size_t>(i)] = now_s();
+		dues[static_cast<std::size_t>(i)] = due;
 		submit([&starts, &done, i] {
 			starts[static_cast<std::size_t>(i)] = now_s();
 			done.fetch_add(1, std::memory_order_release);
@@ -361,16 +363,22 @@ void trickle(const char* name, long n, double gap_ns, Submit&& submit) {
 	for (long i = 0; i < n; i++) {
 		delay[static_cast<std::size_t>(i)] = (starts[static_cast<std::size_t>(i)] - submitted[static_cast<std::size_t>(i)]) * 1e9;
 	}
+	std::vector<double> late(static_cast<std::size_t>(n));
+	for (long i = 0; i < n; i++) {
+		late[static_cast<std::size_t>(i)] = (starts[static_cast<std::size_t>(i)] - dues[static_cast<std::size_t>(i)]) * 1e9;
+	}
+	std::sort(late.begin(), late.end());
 	std::sort(delay.begin(), delay.end());
 	// The producer's own spin-wait is one core for the whole run; the rest is the pool's.
 	const double wall = now_s() - t0;
-	std::printf("  %-20s delay median %7.0f ns  p99 %8.0f ns   pool CPU %6.0f ns per task\n", name, delay[delay.size() / 2], delay[delay.size() * 99 / 100], (cpu - wall) * 1e9 / static_cast<double>(n));
+	std::printf("  %-20s delay median %7.0f ns  p99 %8.0f ns   pool CPU %6.0f ns per task  from-due p99 %8.0f ns\n", name, delay[delay.size() / 2], delay[delay.size() * 99 / 100], (cpu - wall) * 1e9 / static_cast<double>(n), late[late.size() * 99 / 100]);
 }
 
 void run_trickle(double gap_ns, long n) {
 	const int W = 4;
 	std::printf("--- trickle: one producer, a task every %.0f ns, %d workers\n", gap_ns, W);
 	threadpool_old::ThreadPool<> old_pool("T{:02}", W);
+	threadpool_old::ThreadPool<> old_pool2("T{:02}", W);
 	ThreadPool<> new_pool("T{:02}", W);
 	NaivePool naive(W);
 #ifdef HAVE_ASIO
@@ -378,6 +386,7 @@ void run_trickle(double gap_ns, long n) {
 #endif
 	for (int r = 0; r < 2; r++) {
 		trickle("old ThreadPool", n, gap_ns, [&](auto&& t) { old_pool.enqueue(std::forward<decltype(t)>(t)); });
+		trickle("old ThreadPool (A/A)", n, gap_ns, [&](auto&& t) { old_pool2.enqueue(std::forward<decltype(t)>(t)); });
 		trickle("new ThreadPool", n, gap_ns, [&](auto&& t) { new_pool.enqueue(std::forward<decltype(t)>(t)); });
 		trickle("mutex+cv naive", n, gap_ns, [&](auto&& t) { naive.enqueue(std::forward<decltype(t)>(t)); });
 #ifdef HAVE_ASIO
@@ -440,6 +449,9 @@ int main(int argc, char** argv) {
 #endif
 	if (std::string(only) == "trickle") {
 		for (double gap : {1000.0, 5000.0, 50000.0}) {
+			if (const char* g = std::getenv("TRICKLE_GAP"); g && std::atof(g) != gap) {
+				continue;
+			}
 			run_trickle(gap, N);
 		}
 		return 0;
