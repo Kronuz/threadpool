@@ -1,6 +1,6 @@
 # enqueue against a mutex pool and Asio
 
-> Status: HISTORY (2026-11-02) measures `ThreadPool::enqueue`, deleted from the library. The bench and the pool are at `threadpool:0983f2d` (`bench/enqueue_bench.cc`, `threadpool.hh`).
+> Status: HISTORY (2026-11-02) measures `ThreadPool::enqueue`, deleted from the library. The bench and the pool are at `threadpool:bd60941` (`bench/enqueue_bench.cc`, `threadpool.hh`).
 
 `bench/enqueue_bench.cc` (`enqueue_bench`, built with `-DTHREADPOOL_BUILD_BENCH=ON`) submits a trivial
 task through `ThreadPool::enqueue`, through a pool of the kind most people write first, and through

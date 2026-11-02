@@ -18,7 +18,7 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   and `running_size()`. Their tests (`test/test.cc`, `task_group*.cc`, `pool_diff.cc`,
   `pool_stress.cc`, `small_task.cc`, the frozen `test/threadpool_old.hh`), the
   `enqueue_bench` and the `research/` harness go with them; the last commit that has them
-  is `threadpool:0983f2d`. The scheduler library, the logger and Xapiand run on `WorkPool`.
+  is `threadpool:bd60941`. The scheduler library, the logger and Xapiand run on `WorkPool`.
 - `ThreadPolicyType::wal_writer`, `replication`, `doc_matchers`, `doc_preparers`,
   `doc_indexers`, `committers`, `fsynchers`, `updaters`, `http_servers`, `binary_servers`,
   `http_clients` and `binary_clients`: no one selects on them (the policy is ignored at run

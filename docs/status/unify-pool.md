@@ -39,7 +39,7 @@
 
 ## Note for the Detent lead: what was removed, and the `WorkPool` equivalents
 
-Detent stays on its pinned threadpool and migrates itself. At `threadpool:0983f2d` (the last commit with them) the old names are
+Detent stays on its pinned threadpool and migrates itself. At `threadpool:bd60941` (the last commit with them) the old names are
 still there. Gone after this branch:
 
 | Removed | Use |
