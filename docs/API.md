@@ -152,6 +152,8 @@ index.wait();
   waits. Which node fires first is unspecified.
 - `cancel_and_wait() -> size_t` — `cancel()` (boxed items freed, caller-owned ones dropped
   unrun and left to their owner), then `wait()`; returns how many queued items it dropped.
+- `pending()`, `running()` — items queued and not started, and items executing, now: the
+  group's backlog and load, each read under the group's lock.
 - `stop_requested()` (for the innermost item of this group on this thread's stack),
   `set_width()`, `set_weight()`, `pool()`.
 - `~WorkGroup()` — cancel (queued boxed items are freed unrun; caller-owned ones are

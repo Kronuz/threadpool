@@ -6,6 +6,15 @@ releases, so entries are dated.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#threadpool) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-02
+
+### Added
+
+- `WorkGroup::pending()` and `WorkGroup::running()`: the items queued and not started, and
+  the items executing, so a host can report a group's backlog and load. The scheduler
+  library's `ThreadedScheduler` reads them for `size()` and `running_size()` now that it runs
+  on a `WorkPool`.
+
 ## 2026-11-01
 
 ### Changed

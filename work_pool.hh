@@ -1455,6 +1455,23 @@ public:
 		return dropped;
 	}
 
+	// Items queued and not started, and items executing, now: the group's backlog and load.
+	// Each is exact at the instant it is read under the group's lock; the two are not read
+	// together.
+	std::size_t pending() const noexcept {
+		_s->mu.lock();
+		std::size_t n = _s->pending();
+		_s->mu.unlock();
+		return n;
+	}
+
+	std::size_t running() const noexcept {
+		_s->mu.lock();
+		std::size_t n = _s->running;
+		_s->mu.unlock();
+		return n;
+	}
+
 	// Whether the item running on this thread belongs to this group and saw a cancel.
 	bool stop_requested() const noexcept {
 		auto* frame = threadpool_detail::tls_here.find(_s);

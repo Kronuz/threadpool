@@ -89,6 +89,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(work_group_test PRIVATE threadpool)
   add_test(NAME work_group COMMAND work_group_test)
 
+  add_executable(work_counts_test test/work_counts.cc)
+  target_link_libraries(work_counts_test PRIVATE threadpool)
+  add_test(NAME work_counts COMMAND work_counts_test)
+
   add_executable(work_scheduling_test test/work_scheduling.cc)
   target_link_libraries(work_scheduling_test PRIVATE threadpool)
   add_test(NAME work_scheduling COMMAND work_scheduling_test)

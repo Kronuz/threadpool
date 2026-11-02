@@ -102,6 +102,10 @@ run "a ticket that retires after a burst stays counted" task_group.hh \
 					--state->tickets;
 					if (state->running == 0) {" "if (state->queued.empty()) {
 					if (state->running == 0) {" test/task_group.cc
+run "pending() counts only the query lane" work_pool.hh \
+	"std::size_t n = _s->pending();" "std::size_t n = _s->lanes[0].pending;" test/work_counts.cc
+run "running() reports the queued count" work_pool.hh \
+	"std::size_t n = _s->running;" "std::size_t n = _s->pending();" test/work_counts.cc
 
 if [ "$survived" -ne 0 ]; then
 	echo "some mutants survived"
