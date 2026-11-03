@@ -47,7 +47,9 @@
   `async_check --strict` 0 (with `--owed` it exits 1 on 27 owed hits, 259 hits on master too: the gate after X6),
   `path_boundary_check.sh` and `graceful_shutdown_check.sh` pass, docs E2E (newman 6.2.3) GREEN 641/641 over 371 requests.
   The turn-wait mutant (`turn.lock()` without the token) hangs `test_pool`'s "a turn wait times out" case. gate-prep had not
-  landed on master: merge master into the branch and rerun the Release ctest then.
+  landed when this was first proven; after master merged in (`Xapiand:11e3d82a4`, gate-prep) the Release ctest (34),
+  `async_check --strict`, `path_boundary_check.sh`, `graceful_shutdown_check.sh` and the E2E (644/644 over 374 requests) were rerun
+  green; the ASan+UBSan ctest ran before the merge. Xapiand pins task at `b406766` (C1), not task main's C2.
 
 ## Note for the Detent lead: what was removed, and the `WorkPool` equivalents
 
