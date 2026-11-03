@@ -35,7 +35,19 @@
 - `bench/kernel_time.cc` and `examples/demo.cc` run on `WorkPool`. README, `ARCHITECTURE.md`, `AGENTS.md`, `docs/API.md` and the
   CHANGELOG describe `WorkPool` alone; `docs/perf/enqueue.md`, `docs/perf/trickle/p99.md`, `docs/research/scheduler.md` are HISTORY.
 - Proof: ctest 6/6 (RelWithDebInfo, asserts live); `test/mutants.sh` both counter mutants caught. No library header other than
-  `thread.hh`'s enum changed, so the pool's behavior is the landed one.
+  `thread.hh`'s enum changed, so the pool's behavior is the landed one. `preflight.sh` (mac hardened, mac ASan+UBSan, Linux and
+  FreeBSD VMs) ok at `db38594`; the branch then merged main's `bd60941` (a test-only fix). CI (workflow_dispatch on the branch):
+  run 41546508647 at `eb4751a`, all 8 jobs green (Linux gcc, clang, arm64, ASan+UBSan, TSan; macOS arm64, x86_64; FreeBSD).
+- Repins (this wave), each on its repo's `phase7c/drop-threadpool`, CI green on the head named:
+  scheduler `1e5ccc9` (run 41546517708), logger `2356791` (41546525411), strata `3f564dc` (41546532591),
+  prospect `bd78224` (41546540162). Land in order threadpool, scheduler, logger, strata, prospect, by fast-forward, so these
+  SHAs stay valid. strata and prospect also move task to `b406766`. http-log and prism pin logger `801105c` and need no change.
+- Xapiand (local master only, never pushed): branch `deps/drop-threadpool`, worktree `~/code/Kronuz/Xapiand-wt/drop-threadpool`,
+  commits `Xapiand:602121ecd` and `Xapiand:45d81215e` (fs `291842c`). Release ctest 32/32, ASan+UBSan ctest 32/32,
+  `async_check --strict` 0 (with `--owed` it exits 1 on 27 owed hits, 259 hits on master too: the gate after X6),
+  `path_boundary_check.sh` and `graceful_shutdown_check.sh` pass, docs E2E (newman 6.2.3) GREEN 641/641 over 371 requests.
+  The turn-wait mutant (`turn.lock()` without the token) hangs `test_pool`'s "a turn wait times out" case. gate-prep had not
+  landed on master: merge master into the branch and rerun the Release ctest then.
 
 ## Note for the Detent lead: what was removed, and the `WorkPool` equivalents
 
